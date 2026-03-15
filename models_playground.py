@@ -14,7 +14,11 @@ def _():
     from torch.utils.data import DataLoader
 
     from dataset.loader import SPYDataset
-    from dataset.preprocessing import augment_dataset, time_train_test_split, split_features_target
+    from dataset.preprocessing import (
+        augment_dataset,
+        time_train_test_split,
+        split_features_target,
+    )
 
     from models.lstm import LSTMModel
     from models.sarimax import direction_accuracy, forecast_sarimax, train_sarimax
@@ -77,7 +81,9 @@ def _(mo):
 @app.cell
 def _(X_train, forecast_sarimax, np, test_df, train_sarimax, y_train):
     sarimax_fit = train_sarimax(y_train, X_train, order=(1, 1, 1))
-    sarimax_forecast = np.asarray(forecast_sarimax(sarimax_fit, steps=test_df.height), dtype=float)
+    sarimax_forecast = np.asarray(
+        forecast_sarimax(sarimax_fit, steps=test_df.height), dtype=float
+    )
     return
 
 
@@ -97,7 +103,9 @@ def _(DataLoader, SPYDataset, test_df, train_df):
     train_dataset = SPYDataset(train_df, window_size=window_size)
     test_dataset = SPYDataset(test_df, window_size=window_size)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, drop_last=True)
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=False, drop_last=True
+    )
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     return test_loader, train_dataset, train_loader
 
@@ -107,7 +115,9 @@ def _(LSTMModel, mo, nn, optim, torch, train_dataset, train_loader):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     input_dim = train_dataset.X.shape[1]
-    model = LSTMModel(input_dim=input_dim, hidden_dim=64, layer_dim=2, output_dim=1).to(device)
+    model = LSTMModel(input_dim=input_dim, hidden_dim=64, layer_dim=2, output_dim=1).to(
+        device
+    )
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
@@ -134,7 +144,9 @@ def _(LSTMModel, mo, nn, optim, torch, train_dataset, train_loader):
 
         train_losses.append(running_loss / max(batches, 1))
 
-    mo.md(f"Torch training finished on **{device}**. Last train loss: **{train_losses[-1]:.6f}**")
+    mo.md(
+        f"Torch training finished on **{device}**. Last train loss: **{train_losses[-1]:.6f}**"
+    )
     return device, model
 
 

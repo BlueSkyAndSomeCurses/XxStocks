@@ -5,10 +5,11 @@ from torch.utils.data import Dataset, DataLoader
 
 from dataset.preprocessing import split_features_target
 
+
 class SPYDataset(Dataset):
     def __init__(self, data: pl.DataFrame, window_size: int = 16):
         X_df, y_df = split_features_target(data)
-        
+
         self.X = torch.tensor(X_df.to_numpy(), dtype=torch.float32)
         self.y = torch.tensor(y_df.to_numpy(), dtype=torch.float32)
 

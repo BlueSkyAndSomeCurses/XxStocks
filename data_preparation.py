@@ -269,7 +269,8 @@ def _(clean, pl, political_tweets):
                 stopwords=True,
                 numbers=True,
                 punct=True,
-            ), return_dtype = pl.String
+            ),
+            return_dtype=pl.String,
         ),
     ).rename(
         {
@@ -306,8 +307,7 @@ def _(mo, political_tweets_norm):
 def _(clean, normalize_text, pl):
     trump_tweets = pl.read_csv("data/final_data/train/trump_tweets_01-08-2021.csv")
     trump_tweets_norm = (
-        trump_tweets
-            .select(
+        trump_tweets.select(
             pl.lit("Trump").alias("UserName"),
             pl.col("date").str.to_datetime(),
             pl.col("text")
@@ -318,18 +318,18 @@ def _(clean, normalize_text, pl):
                     extra_spaces=True,
                     stopwords=True,
                     numbers=True,
-                punct=True,
-            ), return_dtype = pl.String
-        ),
-        ).rename(
+                    punct=True,
+                ),
+                return_dtype=pl.String,
+            ),
+        )
+        .rename(
             {
                 "date": "Date",
                 "text": "Text",
             }
         )
-        .with_columns(
-            pl.col("Text").map_elements(normalize_text)
-        )
+        .with_columns(pl.col("Text").map_elements(normalize_text))
     )
     return (trump_tweets_norm,)
 
@@ -352,35 +352,32 @@ def _(json):
 
 @app.cell
 def _(congress_tweets, pl):
-    tweets_congress_table = pl.DataFrame(congress_tweets, schema=["created_at", "screen_name", "text", "user_id"]).rename({
-        "created_at": "Date",
-        "screen_name": "UserName",
-        "text": "Text"
-    }).with_columns(pl.from_epoch("Date", time_unit="s"))
+    tweets_congress_table = (
+        pl.DataFrame(
+            congress_tweets, schema=["created_at", "screen_name", "text", "user_id"]
+        )
+        .rename({"created_at": "Date", "screen_name": "UserName", "text": "Text"})
+        .with_columns(pl.from_epoch("Date", time_unit="s"))
+    )
     return (tweets_congress_table,)
 
 
 @app.cell
 def _(clean, normalize_text, pl, tweets_congress_table):
-    tweets_congress_table_norm = (
-        tweets_congress_table
-        .with_columns(
-            pl.col("Text")
-            .str.to_lowercase()
-            .map_elements( 
-                lambda text: clean(
-                    text,
-                    extra_spaces=True,
-                    stopwords=True,
-                    numbers=True,
-                    punct=True,
-                ), return_dtype = pl.String
+    tweets_congress_table_norm = tweets_congress_table.with_columns(
+        pl.col("Text")
+        .str.to_lowercase()
+        .map_elements(
+            lambda text: clean(
+                text,
+                extra_spaces=True,
+                stopwords=True,
+                numbers=True,
+                punct=True,
             ),
-        )
-        .with_columns(
-            pl.col("Text").map_elements(normalize_text)
-        )
-    )
+            return_dtype=pl.String,
+        ),
+    ).with_columns(pl.col("Text").map_elements(normalize_text))
     return (tweets_congress_table_norm,)
 
 
@@ -401,9 +398,9 @@ def _(
         [
             political_tweets_norm,
             trump_tweets_norm[political_tweets_norm.columns],
-            tweets_congress_table_norm[political_tweets_norm.columns]
+            tweets_congress_table_norm[political_tweets_norm.columns],
         ],
-        how="vertical"
+        how="vertical",
     )
     return (full_twitter_data,)
 

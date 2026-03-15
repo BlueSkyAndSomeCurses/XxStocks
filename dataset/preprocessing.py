@@ -2,6 +2,7 @@ import polars as pl
 
 # ,date,open,high,low,close,volume,barCount,average
 
+
 def augment_dataset(df: pl.DataFrame) -> pl.DataFrame:
     new_cols = [
         (pl.col("high") - pl.col("low")).alias("highLow"),
@@ -11,16 +12,19 @@ def augment_dataset(df: pl.DataFrame) -> pl.DataFrame:
     ]
     return df.with_columns(new_cols)
 
+
 def label_data(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns(
-        target = (pl.col("average").shift(-1) > pl.col("average")).cast(pl.Int8)
+        target=(pl.col("average").shift(-1) > pl.col("average")).cast(pl.Int8)
     ).drop_nulls()
+
 
 def split_features_target(df: pl.DataFrame):
     df = label_data(df)
     X = df.drop(["date", "average", "target"])
     y = df.select("target")
     return X, y
+
 
 def time_train_test_split(df: pl.DataFrame, test_ratio: float = 0.2):
     n_rows = df.height

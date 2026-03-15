@@ -13,14 +13,14 @@ def train_sarimax(
     exog = np.asarray(X, dtype=int)
 
     model = SARIMAX(
-		endog=endog,
+        endog=endog,
         exog=exog,
         order=order,
         seasonal_order=seasonal_order,
         enforce_stationarity=False,
         enforce_invertibility=False,
     )
-    
+
     return model.fit(disp=False)
 
 
@@ -31,18 +31,18 @@ def forecast_sarimax(fitted_model, X_test: pl.DataFrame):
 
 
 def direction_accuracy(actual: pl.Series, predicted_values) -> float:
-	actual_diff = actual.diff().drop_nulls().to_numpy()
+    actual_diff = actual.diff().drop_nulls().to_numpy()
 
-	if len(predicted_values) < 2:
-		return 0.0
+    if len(predicted_values) < 2:
+        return 0.0
 
-	pred_series = pl.Series(predicted_values)
-	pred_diff = pred_series.diff().drop_nulls().to_numpy()
+    pred_series = pl.Series(predicted_values)
+    pred_diff = pred_series.diff().drop_nulls().to_numpy()
 
-	n = min(len(actual_diff), len(pred_diff))
-	if n == 0:
-		return 0.0
+    n = min(len(actual_diff), len(pred_diff))
+    if n == 0:
+        return 0.0
 
-	actual_dir = actual_diff[:n] > 0
-	pred_dir = pred_diff[:n] > 0
-	return float((actual_dir == pred_dir).mean())
+    actual_dir = actual_diff[:n] > 0
+    pred_dir = pred_diff[:n] > 0
+    return float((actual_dir == pred_dir).mean())
