@@ -24,9 +24,10 @@ def train_sarimax(
     return model.fit(disp=False)
 
 
-def forecast_sarimax(fitted_model, steps: int):
-	forecast = fitted_model.forecast(steps=steps)
-	return forecast
+def forecast_sarimax(fitted_model, X_test: pl.DataFrame):
+    exog_test = np.asarray(X_test, dtype=float)
+    forecast = fitted_model.forecast(steps=len(exog_test), exog=exog_test)
+    return forecast
 
 
 def direction_accuracy(actual: pl.Series, predicted_values) -> float:
