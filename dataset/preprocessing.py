@@ -11,8 +11,25 @@ def downsample_to_interval(df: pl.DataFrame, interval: str = "30m") -> pl.DataFr
     if date_dtype.is_temporal():
         parsed = df.sort("date")
     else:
+        date_str = (
+            pl.col("date")
+            .cast(pl.Utf8)
+            .str.strip_chars()
+            .str.replace_all(r"\s+", " ")
+        )
+        parsed_date = pl.coalesce(
+            [
+                date_str.str.strptime(
+                    pl.Datetime, format="%Y%m%d %H:%M:%S", strict=False
+                ),
+                date_str.str.strptime(
+                    pl.Datetime, format="%Y-%m-%d %H:%M:%S", strict=False
+                ),
+                date_str.str.strptime(pl.Datetime, format="%Y-%m-%d", strict=False),
+            ]
+        )
         parsed = df.with_columns(
-            pl.col("date").str.to_datetime(strict=False).alias("date")
+            parsed_date.alias("date")
         ).sort("date")
 
     aggregations = []

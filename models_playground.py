@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "marimo>=0.21.1",
+#     "pyzmq>=27.1.0",
+# ]
+# ///
+
 import marimo
 
 __generated_with = "0.20.4"
@@ -34,6 +42,7 @@ def _():
         SPYDataset,
         augment_dataset,
         downsample_to_interval,
+        forecast_sarimax,
         mo,
         nn,
         optim,
@@ -73,7 +82,7 @@ def _(df_augmented, time_train_test_split):
 def _(split_features_target, test_df, train_df):
     X_train, y_train = split_features_target(train_df)
     X_test, y_test = split_features_target(test_df)
-    return X_train, y_train
+    return X_test, X_train, y_train
 
 
 @app.cell(hide_code=True)
@@ -90,17 +99,21 @@ def _(X_train, train_sarimax, y_train):
     return (sarimax_fit,)
 
 
-app._unparsable_cell(
-    r"""
-    sarimax_forecast = forecast_sarimax(sarimax_fit, X_test), dtype=float
-    """,
-    name="_"
-)
-
-
 @app.cell
 def _(sarimax_fit, save_sarimax_model):
     save_sarimax_model(sarimax_fit, "sarimax_model")
+    return
+
+
+@app.cell
+def _(X_test, forecast_sarimax, sarimax_fit):
+    arimax_forecast = forecast_sarimax(sarimax_fit, X_test)
+    return (arimax_forecast,)
+
+
+@app.cell
+def _(arimax_forecast):
+    print(arimax_forecast)
     return
 
 
@@ -142,15 +155,15 @@ def _(torch):
             total_train_loss = 0
             for x_batch, y_batch in train_loader:
                 x_batch, y_batch = x_batch.to(device), y_batch.to(device).view(-1, 1)
-            
+
                 optimizer.zero_grad()
                 logits, _, _ = model(x_batch)
                 loss = criterion(logits, y_batch)
                 loss.backward()
                 optimizer.step()
-            
+
                 total_train_loss += loss.item()
-            
+
             avg_train_loss = total_train_loss / len(train_loader)
             train_losses.append(avg_train_loss)
 
@@ -162,7 +175,7 @@ def _(torch):
                     logits_val, _, _ = model(x_val)
                     v_loss = criterion(logits_val, y_val)
                     total_val_loss += v_loss.item()
-        
+
             avg_val_loss = total_val_loss / len(val_loader)
             val_losses.append(avg_val_loss)
 
@@ -178,7 +191,7 @@ def _(torch):
                     print(f"Early stopping triggered at epoch {epoch+1}")
                     model.load_state_dict(best_model_state)
                     break
-                
+
         return train_losses, val_losses
 
     return (train_model,)
