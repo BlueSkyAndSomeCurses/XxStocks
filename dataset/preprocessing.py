@@ -3,6 +3,44 @@ import polars as pl
 # ,date,open,high,low,close,volume,barCount,average
 
 
+def downsample_to_interval(df: pl.DataFrame, interval: str = "30m") -> pl.DataFrame:
+    if "date" not in df.columns:
+        raise ValueError("Expected a 'date' column for time-based downsampling.")
+
+    date_dtype = df.schema["date"]
+    if date_dtype.is_temporal():
+        parsed = df.sort("date")
+    else:
+        parsed = df.with_columns(
+            pl.col("date").str.to_datetime(strict=False).alias("date")
+        ).sort("date")
+
+    aggregations = []
+    if "open" in parsed.columns:
+        aggregations.append(pl.col("open").first().alias("open"))
+    if "high" in parsed.columns:
+        aggregations.append(pl.col("high").max().alias("high"))
+    if "low" in parsed.columns:
+        aggregations.append(pl.col("low").min().alias("low"))
+    if "close" in parsed.columns:
+        aggregations.append(pl.col("close").last().alias("close"))
+    if "volume" in parsed.columns:
+        aggregations.append(pl.col("volume").sum().alias("volume"))
+    if "barCount" in parsed.columns:
+        aggregations.append(pl.col("barCount").sum().alias("barCount"))
+    if "average" in parsed.columns:
+        aggregations.append(pl.col("average").mean().alias("average"))
+
+    required_cols = [c for c in ["open", "high", "low", "close", "average"] if c in parsed.columns]
+
+    downsampled = (
+        parsed.group_by_dynamic("date", every=interval)
+        .agg(aggregations)
+        .drop_nulls(required_cols)
+    )
+    return downsampled
+
+
 def augment_dataset(df: pl.DataFrame) -> pl.DataFrame:
     new_cols = [
         (pl.col("high") - pl.col("low")).alias("highLow"),

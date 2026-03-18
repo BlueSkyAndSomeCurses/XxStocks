@@ -1,6 +1,7 @@
 import polars as pl
 import numpy as np
-from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tsa.statespace.sarimax import SARIMAX, SARIMAXResults
+
 
 
 def train_sarimax(
@@ -8,6 +9,7 @@ def train_sarimax(
     X: pl.DataFrame,
     order: tuple[int, int, int] = (1, 1, 1),
     seasonal_order: tuple[int, int, int, int] = (0, 0, 0, 0),
+    disp: int | None = 5
 ):
     endog = np.asarray(y, dtype=int)
     exog = np.asarray(X, dtype=int)
@@ -21,7 +23,7 @@ def train_sarimax(
         enforce_invertibility=False,
     )
 
-    return model.fit(disp=False)
+    return model.fit(disp=disp)
 
 
 def forecast_sarimax(fitted_model, X_test: pl.DataFrame):
@@ -46,3 +48,17 @@ def direction_accuracy(actual: pl.Series, predicted_values) -> float:
     actual_dir = actual_diff[:n] > 0
     pred_dir = pred_diff[:n] > 0
     return float((actual_dir == pred_dir).mean())
+
+def save_sarimax_model(fitted_model, filepath: str):
+    try:
+        fitted_model.save(filepath)
+    except Exception as e:
+        print(f"Failed to save model: {e}")
+
+def load_sarimax_model(filepath: str):
+    try:
+        model = SARIMAXResults.load(filepath)
+        return model
+    except Exception as e:
+        print(f"Failed to load model: {e}")
+        return None
