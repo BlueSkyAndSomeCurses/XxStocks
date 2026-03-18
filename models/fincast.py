@@ -48,6 +48,19 @@ class BinaryClassificationHead(nn.Module):
         return self.proj(h_last).squeeze(-1)
 
 
+class ContinuousRegressionHead(nn.Module):
+    def __init__(self, d_model: int, dropout: float = 0.1) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.proj = nn.Linear(d_model, 1)
+
+    def forward(self, h_last: Tensor) -> Tensor:
+        h_last = self.norm(h_last)
+        h_last = self.dropout(h_last)
+        return self.proj(h_last).squeeze(-1)
+
+
 class SparseMoE(nn.Module):
     def __init__(self, d_model: int, hidden_dim: int, n_experts: int = 4, top_k: int = 2) -> None:
         super().__init__()
@@ -240,5 +253,130 @@ class BinaryFinCast(nn.Module):
         if target is not None:
             y = target.float().view(-1)
             out["loss"] = F.binary_cross_entropy_with_logits(logits, y)
+
+        return out
+
+
+@dataclass
+class ContinuousFinCastConfig:
+    input_dim: int
+    patch_len: int = 16
+    d_model: int = 256
+    n_heads: int = 8
+    n_layers: int = 12
+    ff_mult: int = 4
+    dropout: float = 0.1
+    n_freqs: int = 8
+
+
+class ContinuousFinCast(nn.Module):
+    def __init__(self, config: ContinuousFinCastConfig) -> None:
+        super().__init__()
+        self.config = config
+        self.patch_len = config.patch_len
+
+        patch_dim = config.patch_len * config.input_dim
+        self.input_residual = ResidualMLP(
+            dim=patch_dim,
+            hidden_dim=max(patch_dim * 2, config.d_model),
+            dropout=config.dropout,
+        )
+        self.patch_to_model = nn.Linear(patch_dim, config.d_model)
+        self.freq_embed = nn.Embedding(config.n_freqs, config.d_model)
+
+        self.backbone = nn.ModuleList(
+            [
+                DecoderMoEBlock(
+                    d_model=config.d_model,
+                    n_heads=config.n_heads,
+                    ff_mult=config.ff_mult,
+                    dropout=config.dropout,
+                )
+                for _ in range(config.n_layers)
+            ]
+        )
+        self.final_norm = nn.LayerNorm(config.d_model)
+
+        self.regression_head = ContinuousRegressionHead(
+            d_model=config.d_model,
+            dropout=config.dropout,
+        )
+
+    @staticmethod
+    def _make_causal_mask(seq_len: int, device: torch.device) -> Tensor:
+        return torch.triu(
+            torch.full((seq_len, seq_len), float("-inf"), device=device),
+            diagonal=1,
+        )
+
+    def _patchify(self, x: Tensor) -> Tensor:
+        bsz, seq_len, channels = x.shape
+        n_patches = seq_len // self.patch_len
+        if n_patches < 1:
+            raise ValueError("Sequence length must be >= patch_len.")
+
+        x = x[:, : n_patches * self.patch_len, :]
+        x = x.reshape(bsz, n_patches, self.patch_len * channels)
+        return x
+
+    def _instance_norm(self, patches: Tensor, mask: Optional[Tensor] = None) -> tuple[Tensor, Tensor, Tensor]:
+        eps = 1e-6
+        if mask is None:
+            mu = patches.mean(dim=-1, keepdim=True)
+            var = patches.var(dim=-1, unbiased=False, keepdim=True)
+        else:
+            valid = 1.0 - mask.float()
+            denom = valid.sum(dim=-1, keepdim=True).clamp_min(1.0)
+            mu = (patches * valid).sum(dim=-1, keepdim=True) / denom
+            var = ((patches - mu) ** 2 * valid).sum(dim=-1, keepdim=True) / denom
+
+        sigma = torch.sqrt(var + eps)
+        x_norm = (patches - mu) / sigma
+        return x_norm, mu, sigma
+
+    def load_pretrained_backbone(self, state_dict: dict, strict: bool = False) -> None:
+        self.load_state_dict(state_dict, strict=strict)
+
+    def set_lightweight_finetune(self) -> None:
+        for p in self.parameters():
+            p.requires_grad = False
+
+        for p in self.regression_head.parameters():
+            p.requires_grad = True
+
+        n_layers = len(self.backbone)
+        n_unfreeze = max(1, int(0.1 * n_layers))
+        for block in self.backbone[-n_unfreeze:]:
+            for p in block.parameters():
+                p.requires_grad = True
+
+    def forward(
+        self,
+        x: Tensor,
+        freq_id: Tensor,
+        target: Optional[Tensor] = None,
+        patch_mask: Optional[Tensor] = None,
+    ) -> dict[str, Tensor]:
+        patches = self._patchify(x)  # [B, N, Dp]
+        patches, _, _ = self._instance_norm(patches, mask=patch_mask)
+
+        h = self.input_residual(patches)
+        h = self.patch_to_model(h)  # [B, N, D]
+        h = h + self.freq_embed(freq_id).unsqueeze(1)
+
+        seq_len = h.size(1)
+        causal_mask = self._make_causal_mask(seq_len=seq_len, device=h.device)
+        for block in self.backbone:
+            h = block(h, attn_mask=causal_mask)
+        h = self.final_norm(h)
+
+        h_last = h[:, -1, :]
+        pred = self.regression_head(h_last)  # [B]
+
+        out = {"prediction": pred}
+
+        if target is not None:
+            y = target.float().view(-1)
+            out["loss"] = F.huber_loss(pred, y, delta=0.01)
 
         return out

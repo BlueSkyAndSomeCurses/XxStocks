@@ -11,8 +11,8 @@ def train_sarimax(
     seasonal_order: tuple[int, int, int, int] = (0, 0, 0, 0),
     disp: int | None = 5
 ):
-    endog = np.asarray(y, dtype=int)
-    exog = np.asarray(X, dtype=int)
+    endog = np.asarray(y, dtype=float)
+    exog = np.asarray(X, dtype=float)
 
     model = SARIMAX(
         endog=endog,

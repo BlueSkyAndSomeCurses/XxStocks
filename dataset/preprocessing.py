@@ -68,17 +68,86 @@ def augment_dataset(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns(new_cols)
 
 
-def label_data(df: pl.DataFrame) -> pl.DataFrame:
+def add_binary_target(
+    df: pl.DataFrame,
+    price_col: str = "average",
+    target_col: str = "target_binary",
+) -> pl.DataFrame:
     return df.with_columns(
-        target=(pl.col("average").shift(-1) > pl.col("average")).cast(pl.Int8)
-    ).drop_nulls()
+        (
+            pl.when(pl.col(price_col).shift(-1) > pl.col(price_col))
+            .then(1)
+            .otherwise(-1)
+            .cast(pl.Int8)
+        ).alias(target_col)
+    ).drop_nulls([target_col])
 
 
-def split_features_target(df: pl.DataFrame):
-    df = label_data(df)
-    X = df.drop(["date", "average", "target"])
-    y = df.select("target")
+def add_continuous_target(
+    df: pl.DataFrame,
+    price_col: str = "average",
+    target_col: str = "target_continuous",
+) -> pl.DataFrame:
+    return df.with_columns(
+        (
+            (pl.col(price_col).shift(-1) - pl.col(price_col))
+            / pl.col(price_col)
+        ).alias(target_col)
+    ).drop_nulls([target_col])
+
+
+def add_prediction_targets(df: pl.DataFrame, price_col: str = "average") -> pl.DataFrame:
+    with_binary = add_binary_target(df, price_col=price_col)
+    with_both = add_continuous_target(with_binary, price_col=price_col)
+    return with_both
+
+
+def label_data(df: pl.DataFrame) -> pl.DataFrame:
+    return add_binary_target(df).rename({"target_binary": "target"})
+
+
+def split_features_target(
+    df: pl.DataFrame,
+    task: str = "binary",
+    price_col: str = "average",
+):
+    prepared = add_prediction_targets(df, price_col=price_col)
+
+    if task == "binary":
+        target_col = "target_binary"
+    elif task in {"continuous", "non-binary", "non_binary"}:
+        target_col = "target_continuous"
+    else:
+        raise ValueError("task must be either 'binary' or 'continuous'.")
+
+    drop_cols = ["date", price_col, "target_binary", "target_continuous"]
+    existing_drop_cols = [col for col in drop_cols if col in prepared.columns]
+
+    X = prepared.drop(existing_drop_cols)
+    y = prepared.select(target_col)
     return X, y
+
+
+def prepare_arima_data(
+    df: pl.DataFrame,
+    task: str = "binary",
+    price_col: str = "average",
+):
+    prepared = add_prediction_targets(df, price_col=price_col)
+
+    if task == "binary":
+        target_col = "target_binary"
+    elif task in {"continuous", "non-binary", "non_binary"}:
+        target_col = "target_continuous"
+    else:
+        raise ValueError("task must be either 'binary' or 'continuous'.")
+
+    drop_cols = ["date", "target_binary", "target_continuous"]
+    exog_cols = [c for c in prepared.columns if c not in drop_cols and c != target_col]
+
+    y = prepared.get_column(target_col)
+    X = prepared.select(exog_cols)
+    return y, X
 
 
 def time_train_test_split(df: pl.DataFrame, test_ratio: float = 0.2):
