@@ -13,7 +13,7 @@
 
 import marimo
 
-__generated_with = "0.21.1"
+__generated_with = "0.20.4"
 app = marimo.App(width="medium")
 
 
@@ -150,15 +150,19 @@ def _(mo):
 
 
 @app.cell
-def _(
-    X_test_cont,
-    X_train_cont,
-    forecast_sarimax,
-    np,
-    train_sarimax,
-    y_train_cont,
-):
-    sarimax_cont = train_sarimax(y_train_cont, X_train_cont, order=(1, 0, 1))
+def _(X_train_cont, train_sarimax, y_train_cont):
+    sarimax_cont = train_sarimax(y_train_cont, X_train_cont, order=(3, 1, 3))
+    return (sarimax_cont,)
+
+
+@app.cell
+def _(sarimax_cont):
+    sarimax_cont.save("data/models_checkpoints/sarmix_1")
+    return
+
+
+@app.cell
+def _(X_test_cont, forecast_sarimax, np, sarimax_cont):
     pred_cont = np.asarray(forecast_sarimax(sarimax_cont, X_test_cont)).reshape(-1)
     return (pred_cont,)
 

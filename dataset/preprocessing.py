@@ -152,10 +152,6 @@ def get_bag_of_words(
 
     twitter_posts_tokenized = twitter_posts.with_columns(
         pl.col("Text").str.split(" ").alias("Tokens")
-    ).with_columns(
-        pl.col("Tokens")
-        .map_elements(lambda tokens: any(t in dict_words for t in tokens))
-        .alias("HasDictWord")
     )
 
     bag_of_words_prep = (
@@ -166,30 +162,28 @@ def get_bag_of_words(
         .sort("Date")
     )
 
-    bow_with_categories = bag_of_words_prep.join(
-        dict_flags, left_on="Tokens", right_on="EntryCleaned", how="left"
-    ).with_columns(
-        [pl.col(c).fill_null(False).cast(pl.UInt32) for c in category_columns]
+    bow_with_categories = (
+        bag_of_words_prep.join(
+            dict_flags, left_on="Tokens", right_on="EntryCleaned", how="left"
+        )
+        .with_columns(
+            [pl.col(c).fill_null(False).cast(pl.UInt32) for c in category_columns]
+        )
+        .sort("Date")
     )
 
     rolling_bag_of_words = (
         bag_of_words_prep.rolling("Date", period=time_window, group_by="Tokens")
         .agg(pl.len().alias("Count"))
-        .group_by("Date", "Tokens")
-        .agg(pl.len().alias("Count"))
+        .unique()
         .pivot("Tokens", values="Count", index="Date")
         .fill_null(0)
         .sort("Date")
     )
 
     rolling_category_counts = (
-        bow_with_categories.rolling("Date", period="1mo")
-        .agg(
-            [
-                pl.col(column).sum()
-                for column in category_columns
-            ]
-        )
+        bow_with_categories.rolling("Date", period=time_window)
+        .agg([pl.col(column).sum() for column in category_columns])
         .fill_null(0)
         .sort("Date")
     )
@@ -205,20 +199,21 @@ def get_category_features(
     rolling_features: pl.DataFrame, dictionary: pl.DataFrame
 ) -> pl.DataFrame:
     category_columns = [
-        col_name
-        for col_name in dictionary.columns
-        if col_name != "EntryCleaned"
+        col_name for col_name in dictionary.columns if col_name != "EntryCleaned"
     ]
 
-    category_features = rolling_features.select(*category_columns, "Date").select(
-        "Date",
-        pl.sum_horizontal("Econ@", "Exch", "ECON").alias(
-            "EconomicWords"
-        ),
-        "Legal",
-        "Milit",
-        "Polit@",
-        "PowTot",
+    category_features = (
+        rolling_features.select(*category_columns, "Date")
+        .select(
+            "Date",
+            pl.sum_horizontal("Econ@", "Exch", "ECON").alias("EconomicWords"),
+            "Legal",
+            "Milit",
+            "Polit@",
+            "PowTot",
+        )
+        .unique()
+        .sort("Date")
     )
 
     return category_features
@@ -227,10 +222,10 @@ def get_category_features(
 def combine_numerical_and_text_data(
     stock_augmented_data: pl.DataFrame, text_with_features: pl.DataFrame
 ) -> pl.DataFrame:
+    
+    combined_data = stock_augmented_data.join_asof(text_with_features, left_on="date", right_on="Date", strategy="backward").rename({"date": "TradeDate"})
 
-    combined_data = text_with_features.join_asof(
-        stock_augmented_data, left_on="Date", right_on="date", strategy="forward"
-    )
+    
 
     combined_data = combined_data.with_columns(
         [
@@ -240,7 +235,7 @@ def combine_numerical_and_text_data(
             for category_column in ["EconomicWords", "Milit", "Polit@", "PowTot"]
             for index_column in ["RSI", "RVI"]
         ]
-    )
+    ).drop_nulls()
 
     return combined_data
 

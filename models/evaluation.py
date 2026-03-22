@@ -22,6 +22,24 @@ def _binarize_sign(values) -> np.ndarray:
     arr = _to_numpy_1d(values)
     return np.where(arr >= 0, 1, -1)
 
+def directional_accuracy_from_prices(y_true, y_pred, ignore_flat: bool = True) -> float:
+    y_true = np.asarray(y_true).reshape(-1)
+    y_pred = np.asarray(y_pred).reshape(-1)
+    n = min(y_true.size, y_pred.size)
+    y_true = y_true[:n]
+    y_pred = y_pred[:n]
+
+    true_dir = np.sign(np.diff(y_true))   # -1, 0, +1
+    pred_dir = np.sign(np.diff(y_pred))
+
+    if ignore_flat:
+        mask = true_dir != 0
+        if not np.any(mask):
+            return float("nan")
+        return float((true_dir[mask] == pred_dir[mask]).mean())
+
+    return float((true_dir == pred_dir).mean())
+
 
 def evaluate_predictions(y_true, y_pred, task: str = "binary") -> dict[str, float]:
     y_true_arr = _to_numpy_1d(y_true)
@@ -61,9 +79,7 @@ def evaluate_predictions(y_true, y_pred, task: str = "binary") -> dict[str, floa
         mape = np.abs((y_true_arr - y_pred_arr) / denom)
         mape = float(np.nanmean(mape)) if np.isfinite(np.nanmean(mape)) else float("nan")
 
-        directional_accuracy = float(
-            (_binarize_sign(y_true_arr) == _binarize_sign(y_pred_arr)).mean()
-        )
+        directional_accuracy = directional_accuracy_from_prices(y_true_arr, y_pred_arr)
 
         return {
             "mae": float(mae),

@@ -25,7 +25,7 @@ def _():
 @app.cell
 def _(pl):
     dictionary = pl.read_csv("data/final_data/dictionary/cleaned_dict.csv")
-    twitter_posts= pl.read_csv("data/final_data/train/twitter_final.csv").with_columns(
+    twitter_posts = pl.read_csv("data/final_data/train/twitter_final.csv").with_columns(
         pl.col("Date").str.to_datetime()
     )
     return dictionary, twitter_posts
@@ -65,14 +65,15 @@ def _(mo):
 
 
 @app.cell
-def _(dict_words, pl, twitter_posts):
+def _(pl, twitter_posts):
     twitter_posts_tokenized = twitter_posts.with_columns(
         pl.col("Text").str.split(" ").alias("Tokens")
-    ).with_columns(
-        pl.col("Tokens")
-        .map_elements(lambda tokens: any(t in dict_words for t in tokens))
-        .alias("HasDictWord")
     )
+    # .with_columns(
+    #     pl.col("Tokens")
+    #     .map_elements(lambda tokens: any(t in dict_words for t in tokens))
+    #     .alias("HasDictWord")
+    # )
     return (twitter_posts_tokenized,)
 
 
@@ -93,8 +94,10 @@ def _(category_columns, dict_flags, dict_words, pl, twitter_posts_tokenized):
 
 
 @app.cell
-def _(bow_with_categories):
-    bow_with_categories
+def _(bag_of_words_prep, pl):
+    bag_of_words_prep.rolling("Date", period="1mo", group_by="Tokens").agg(
+        pl.len().alias("Count")
+    ).unique().pivot("Tokens", values="Count", index="Date")
     return
 
 
@@ -124,7 +127,6 @@ def _(bag_of_words_prep, bow_with_categories, category_columns, pl):
 @app.cell
 def _(rolling_bag_of_words):
     rolling_bag_of_words
-
     return
 
 
