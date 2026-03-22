@@ -3,7 +3,6 @@ import numpy as np
 from statsmodels.tsa.statespace.sarimax import SARIMAX, SARIMAXResults
 
 
-
 def train_sarimax(
     y: pl.Series,
     X: pl.DataFrame,

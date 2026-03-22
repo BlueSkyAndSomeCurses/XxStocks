@@ -12,10 +12,7 @@ def downsample_to_interval(df: pl.DataFrame, interval: str = "30m") -> pl.DataFr
         parsed = df.sort("date")
     else:
         date_str = (
-            pl.col("date")
-            .cast(pl.Utf8)
-            .str.strip_chars()
-            .str.replace_all(r"\s+", " ")
+            pl.col("date").cast(pl.Utf8).str.strip_chars().str.replace_all(r"\s+", " ")
         )
         parsed_date = pl.coalesce(
             [
@@ -28,9 +25,7 @@ def downsample_to_interval(df: pl.DataFrame, interval: str = "30m") -> pl.DataFr
                 date_str.str.strptime(pl.Datetime, format="%Y-%m-%d", strict=False),
             ]
         )
-        parsed = df.with_columns(
-            parsed_date.alias("date")
-        ).sort("date")
+        parsed = df.with_columns(parsed_date.alias("date")).sort("date")
 
     aggregations = []
     if "open" in parsed.columns:
@@ -48,7 +43,9 @@ def downsample_to_interval(df: pl.DataFrame, interval: str = "30m") -> pl.DataFr
     if "average" in parsed.columns:
         aggregations.append(pl.col("average").mean().alias("average"))
 
-    required_cols = [c for c in ["open", "high", "low", "close", "average"] if c in parsed.columns]
+    required_cols = [
+        c for c in ["open", "high", "low", "close", "average"] if c in parsed.columns
+    ]
 
     downsampled = (
         parsed.group_by_dynamic("date", every=interval)
@@ -64,8 +61,188 @@ def augment_dataset(df: pl.DataFrame) -> pl.DataFrame:
         (pl.col("open") - pl.col("close")).alias("openClose"),
         (pl.col("high") - pl.col("open")).alias("highOpen"),
         (pl.col("close") - pl.col("low")).alias("closeLow"),
+        pl.max_horizontal(
+            pl.col("high").sub(pl.col("low")),
+            pl.col("high").sub(pl.col("close").shift(1)).abs(),
+            pl.col("low").sub(pl.col("close").shift(1)).abs(),
+        )
+        .truediv(pl.col("average"))
+        .alias("average_true_range"),
+        pl.col("close").sub(pl.col("close").shift(1)).alias("change"),
     ]
-    return df.with_columns(new_cols)
+
+    dataset_with_features = (
+        df.with_columns(new_cols)
+        .with_columns(
+            pl.when(pl.col("change").ge(0))
+            .then(pl.col("change"))
+            .otherwise(pl.lit(0))
+            .alias("gain"),
+            pl.when(pl.col("change").ge(0))
+            .then(pl.lit(0))
+            .otherwise(pl.col("change"))
+            .alias("loss"),
+        )
+        .with_columns(
+            pl.col("gain").ewm_mean(span=14, adjust=False).alias("average_gain"),
+            pl.col("loss").ewm_mean(span=14, adjust=False).alias("average_loss"),
+            pl.col("close").rolling_std(window_size=10).alias("std_dev_10"),
+        )
+        .with_columns(
+            pl.lit(100)
+            .sub(
+                pl.lit(100).truediv(
+                    pl.lit(1).add(
+                        pl.col("average_gain").truediv(pl.col("average_loss"))
+                    )
+                )
+            )
+            .alias("RSI"),
+            pl.when(pl.col("close").ge(pl.col("close").shift(1)))
+            .then(pl.col("std_dev_10"))
+            .otherwise(pl.lit(0))
+            .alias("up_std"),
+            pl.when(pl.col("close").ge(pl.col("close").shift(1)))
+            .then(pl.lit(0))
+            .otherwise(pl.col("std_dev_10"))
+            .alias("down_std"),
+        )
+        .with_columns(
+            pl.col("up_std").ewm_mean(span=14).alias("average_up_std"),
+            pl.col("down_std").ewm_mean(span=14).alias("average_down_std"),
+        )
+        .with_columns(
+            pl.lit(100)
+            .mul(
+                pl.col("average_up_std").truediv(
+                    pl.col("average_up_std").add(pl.col("average_down_std"))
+                )
+            )
+            .alias("RVI")
+        )
+        .drop(
+            "gain",
+            "loss",
+            "average_gain",
+            "average_loss",
+            "std_dev_10",
+            "up_std",
+            "down_std",
+            "average_up_std",
+            "average_down_std",
+            "change",
+        )
+        .drop_nulls()
+    )
+
+    return dataset_with_features
+
+
+def get_bag_of_words(
+    twitter_posts: pl.DataFrame, dictionary: pl.DataFrame, time_window: str = "15"
+) -> pl.DataFrame:
+    category_columns = [
+        col_name for col_name in dictionary.columns if col_name != "EntryCleaned"
+    ]
+
+    dict_words = dictionary["EntryCleaned"].to_list()
+    dict_flags = dictionary.with_columns(
+        [pl.col(column).is_not_null().alias(column) for column in category_columns]
+    )
+
+    twitter_posts_tokenized = twitter_posts.with_columns(
+        pl.col("Text").str.split(" ").alias("Tokens")
+    ).with_columns(
+        pl.col("Tokens")
+        .map_elements(lambda tokens: any(t in dict_words for t in tokens))
+        .alias("HasDictWord")
+    )
+
+    bag_of_words_prep = (
+        twitter_posts_tokenized.explode("Tokens")
+        .filter(pl.col("Tokens").is_not_null())
+        .filter(pl.col("Tokens").ne(""))
+        .filter(pl.col("Tokens").is_in(dict_words))
+        .sort("Date")
+    )
+
+    bow_with_categories = bag_of_words_prep.join(
+        dict_flags, left_on="Tokens", right_on="EntryCleaned", how="left"
+    ).with_columns(
+        [pl.col(c).fill_null(False).cast(pl.UInt32) for c in category_columns]
+    )
+
+    rolling_bag_of_words = (
+        bag_of_words_prep.rolling("Date", period=time_window, group_by="Tokens")
+        .agg(pl.len().alias("Count"))
+        .group_by("Date", "Tokens")
+        .agg(pl.len().alias("Count"))
+        .pivot("Tokens", values="Count", index="Date")
+        .fill_null(0)
+        .sort("Date")
+    )
+
+    rolling_category_counts = (
+        bow_with_categories.rolling("Date", period="1mo")
+        .agg(
+            [
+                pl.col(column).sum()
+                for column in category_columns
+            ]
+        )
+        .fill_null(0)
+        .sort("Date")
+    )
+
+    rolling_features = rolling_bag_of_words.join(
+        rolling_category_counts, on="Date", how="left"
+    ).sort("Date")
+
+    return rolling_features
+
+
+def get_category_features(
+    rolling_features: pl.DataFrame, dictionary: pl.DataFrame
+) -> pl.DataFrame:
+    category_columns = [
+        col_name
+        for col_name in dictionary.columns
+        if col_name != "EntryCleaned"
+    ]
+
+    category_features = rolling_features.select(*category_columns, "Date").select(
+        "Date",
+        pl.sum_horizontal("Econ@", "Exch", "ECON").alias(
+            "EconomicWords"
+        ),
+        "Legal",
+        "Milit",
+        "Polit@",
+        "PowTot",
+    )
+
+    return category_features
+
+
+def combine_numerical_and_text_data(
+    stock_augmented_data: pl.DataFrame, text_with_features: pl.DataFrame
+) -> pl.DataFrame:
+
+    combined_data = text_with_features.join_asof(
+        stock_augmented_data, left_on="Date", right_on="date", strategy="forward"
+    )
+
+    combined_data = combined_data.with_columns(
+        [
+            pl.col(category_column)
+            .mul(pl.col(index_column))
+            .alias(f"{category_column} * {index_column}")
+            for category_column in ["EconomicWords", "Milit", "Polit@", "PowTot"]
+            for index_column in ["RSI", "RVI"]
+        ]
+    )
+
+    return combined_data
 
 
 def add_binary_target(
@@ -88,15 +265,12 @@ def add_continuous_target(
     price_col: str = "average",
     target_col: str = "target_continuous",
 ) -> pl.DataFrame:
-    return df.with_columns(
-        (
-            (pl.col(price_col).shift(-1) - pl.col(price_col))
-            / pl.col(price_col)
-        ).alias(target_col)
-    ).drop_nulls([target_col])
+    return df.with_columns(pl.col(price_col).alias(target_col)).drop_nulls([target_col])
 
 
-def add_prediction_targets(df: pl.DataFrame, price_col: str = "average") -> pl.DataFrame:
+def add_prediction_targets(
+    df: pl.DataFrame, price_col: str = "average"
+) -> pl.DataFrame:
     with_binary = add_binary_target(df, price_col=price_col)
     with_both = add_continuous_target(with_binary, price_col=price_col)
     return with_both

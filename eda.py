@@ -25,7 +25,7 @@ def _():
 @app.cell
 def _(pl):
     dictionary = pl.read_csv("data/final_data/dictionary/cleaned_dict.csv")
-    twitter_posts = pl.read_csv("data/final_data/train/twitter_final.csv").with_columns(
+    twitter_posts= pl.read_csv("data/final_data/train/twitter_final.csv").with_columns(
         pl.col("Date").str.to_datetime()
     )
     return dictionary, twitter_posts
@@ -39,8 +39,29 @@ def _(twitter_posts):
 
 @app.cell
 def _(dictionary):
+    dictionary
+    return
+
+
+@app.cell
+def _(dictionary, pl):
+    category_columns = [
+        col_name for col_name in dictionary.columns if col_name != "EntryCleaned"
+    ]
+
     dict_words = dictionary["EntryCleaned"].to_list()
-    return (dict_words,)
+    dict_flags = dictionary.with_columns(
+        [pl.col(column).is_not_null().alias(column) for column in category_columns]
+    )
+    return category_columns, dict_flags, dict_words
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    # Core data feature extraction preparation
+    """)
+    return
 
 
 @app.cell
@@ -53,6 +74,66 @@ def _(dict_words, pl, twitter_posts):
         .alias("HasDictWord")
     )
     return (twitter_posts_tokenized,)
+
+
+@app.cell
+def _(category_columns, dict_flags, dict_words, pl, twitter_posts_tokenized):
+    bag_of_words_prep = (
+        twitter_posts_tokenized.explode("Tokens")
+        .filter(pl.col("Tokens").is_not_null())
+        .filter(pl.col("Tokens").ne(""))
+        .filter(pl.col("Tokens").is_in(dict_words))
+        .sort("Date")
+    )
+
+    bow_with_categories = bag_of_words_prep.join(
+        dict_flags, left_on="Tokens", right_on="EntryCleaned", how="left"
+    ).with_columns([pl.col(c).fill_null(False).cast(pl.UInt32) for c in category_columns])
+    return bag_of_words_prep, bow_with_categories
+
+
+@app.cell
+def _(bow_with_categories):
+    bow_with_categories
+    return
+
+
+@app.cell
+def _(bag_of_words_prep, bow_with_categories, category_columns, pl):
+    rolling_bag_of_words = (
+        bag_of_words_prep.rolling("Date", period="1mo", group_by="Tokens")
+        .agg(pl.len().alias("Count"))
+        .group_by("Date", "Tokens")
+        .agg(pl.len().alias("Count"))
+        .pivot("Tokens", values="Count", index="Date")
+        .fill_null(0)
+        .sort("Date")
+    )
+
+    rolling_category_counts = (
+        bow_with_categories.rolling("Dat", period="1mo")    
+        .agg([pl.col(column).sum().alias(f"{column}_count") for column in category_columns])
+        .fill_null(0)
+        .sort("Date")
+    )
+
+    rolling_features = rolling_bag_of_words.join(rolling_category_counts, on="Date", how="left")
+    return (rolling_bag_of_words,)
+
+
+@app.cell
+def _(rolling_bag_of_words):
+    rolling_bag_of_words
+
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## Coverage check
+    """)
+    return
 
 
 @app.cell
@@ -89,7 +170,6 @@ def _(dict_words, pl, twitter_posts_tokenized):
         .list.sum()
         .alias("num_dict_words")
     ).select("num_dict_words").describe()
-
     return
 
 
@@ -99,38 +179,6 @@ def _(mo):
     # Cluster check
     """)
     return
-
-
-@app.cell
-def _(dict_words, pl, twitter_posts_tokenized):
-    bag_of_words_prep = (
-        twitter_posts_tokenized.explode("Tokens")
-        .filter(pl.col("Tokens").is_not_null())
-        .filter(pl.col("Tokens").ne(""))
-        .filter(pl.col("Tokens").is_in(dict_words))
-        .sort("Date")
-    )
-
-    rolling_bag_of_words = (
-        bag_of_words_prep.rolling("Date", period="1mo", group_by="Tokens")
-        .agg(pl.len().alias("Count"))
-        .group_by("Date", "Tokens")
-        .agg(pl.len().alias("Count"))
-        .pivot("Tokens", values="Count", index="Date")
-        .fill_null(0)
-        .sort("Date")
-    )
-
-    dynamic_bag_of_words = (
-        bag_of_words_prep.group_by_dynamic("Date", every="1mo", group_by="Tokens")
-        .agg(pl.len().alias("Count"))
-        .group_by("Date", "Tokens")
-        .agg(pl.len().alias("Count"))
-        .pivot("Tokens", values="Count", index="Date")
-        .fill_null(0)
-        .sort("Date")
-    )
-    return dynamic_bag_of_words, rolling_bag_of_words
 
 
 @app.cell
@@ -169,7 +217,6 @@ def _(dynamic_bag_of_words, np, pd, rolling_bow_no_date):
     hover_top = X_counts_pd.apply(
         lambda r: top_k_words(r, TOP_K_WORDS_IN_HOVER), axis=1
     )
-
     return hover_top, month_index
 
 
@@ -257,6 +304,11 @@ def _():
     import marimo as mo
 
     return (mo,)
+
+
+@app.cell
+def _():
+    return
 
 
 if __name__ == "__main__":

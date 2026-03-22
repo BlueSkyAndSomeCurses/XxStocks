@@ -2,13 +2,18 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #     "marimo>=0.21.1",
+#     "numpy==2.4.3",
+#     "polars==1.39.3",
 #     "pyzmq>=27.1.0",
+#     "scikit-learn==1.8.0",
+#     "statsmodels==0.14.6",
+#     "torch==2.10.0",
 # ]
 # ///
 
 import marimo
 
-__generated_with = "0.20.4"
+__generated_with = "0.21.1"
 app = marimo.App(width="medium")
 
 
@@ -26,6 +31,9 @@ def _():
         prepare_arima_data,
         split_features_target,
         time_train_test_split,
+        get_bag_of_words,
+        get_category_features,
+        combine_numerical_and_text_data
     )
     from models.fincast import (
         BinaryFinCast,
@@ -44,9 +52,12 @@ def _():
         ContinuousFinCastConfig,
         LSTMModel,
         augment_dataset,
+        combine_numerical_and_text_data,
         downsample_to_interval,
         evaluate_predictions,
         forecast_sarimax,
+        get_bag_of_words,
+        get_category_features,
         make_dataloader,
         nn,
         np,
@@ -59,26 +70,54 @@ def _():
     )
 
 
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ## Data loading
-    """)
-    return
-
-
 @app.cell
 def _(augment_dataset, downsample_to_interval, pl):
     CSV_PATH = "./data/1_min_SPY_2008-2021.csv"
     df = pl.read_csv(CSV_PATH)
     df = downsample_to_interval(df, interval="30m")
     df_augmented = augment_dataset(df)
-    return (df_augmented,)
+
+
+    dictionary = pl.read_csv("data/final_data/dictionary/cleaned_dict.csv")
+    twitter_posts = pl.read_csv("data/final_data/train/twitter_final.csv").with_columns(
+        pl.col("Date").str.to_datetime()
+    )
+    return df_augmented, dictionary, twitter_posts
 
 
 @app.cell
-def _(df_augmented, time_train_test_split):
-    train_df, test_df = time_train_test_split(df_augmented, test_ratio=0.2)
+def _(dictionary, get_bag_of_words, twitter_posts):
+    text_feature_extracted = get_bag_of_words(twitter_posts, dictionary, "15d")
+    return (text_feature_extracted,)
+
+
+@app.cell
+def _(dictionary, get_category_features, text_feature_extracted):
+    category_features = get_category_features(text_feature_extracted, dictionary) 
+    return (category_features,)
+
+
+@app.cell
+def _(category_features):
+    category_features
+    return
+
+
+@app.cell
+def _(category_features, combine_numerical_and_text_data, df_augmented):
+    combined_data = combine_numerical_and_text_data(df_augmented, category_features)
+    return (combined_data,)
+
+
+@app.cell
+def _(combined_data):
+    combined_data
+    return
+
+
+@app.cell
+def _(combined_data, time_train_test_split):
+    train_df, test_df = time_train_test_split(combined_data, test_ratio=0.2)
     print(train_df.shape, test_df.shape)
     return test_df, train_df
 
@@ -171,7 +210,7 @@ def _(mo):
 def _(make_dataloader, test_df, torch, train_df):
     window_size = 32
     batch_size = 128
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu"
 
     train_loader_bin = make_dataloader(
         train_df, task="binary", window_size=window_size, batch_size=batch_size, shuffle=False, drop_last=True
@@ -518,6 +557,18 @@ def _(
      )
     print("Continuous FinCast metrics:")
     print(metrics_fincast_continuous)
+    return
+
+
+@app.cell
+def _():
+    import marimo as mo
+
+    return (mo,)
+
+
+@app.cell
+def _():
     return
 
 
