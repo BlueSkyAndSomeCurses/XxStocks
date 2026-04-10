@@ -25,7 +25,9 @@ def downsample_to_interval(df: pl.DataFrame, interval: str = "30m") -> pl.DataFr
                 date_str.str.strptime(pl.Datetime, format="%Y-%m-%d", strict=False),
             ]
         )
-        parsed = df.with_columns(parsed_date.alias("date")).sort("date")
+        parsed = df.with_columns(
+            parsed_date.dt.replace_time_zone("US/Mountain").alias("date")
+        ).sort("date")
 
     aggregations = []
     if "open" in parsed.columns:
@@ -222,10 +224,9 @@ def get_category_features(
 def combine_numerical_and_text_data(
     stock_augmented_data: pl.DataFrame, text_with_features: pl.DataFrame
 ) -> pl.DataFrame:
-    
-    combined_data = stock_augmented_data.join_asof(text_with_features, left_on="date", right_on="Date", strategy="backward").rename({"date": "TradeDate"})
-
-    
+    combined_data = stock_augmented_data.join_asof(
+        text_with_features, left_on="date", right_on="Date", strategy="backward"
+    ).rename({"date": "TradeDate"})
 
     combined_data = combined_data.with_columns(
         [
@@ -260,7 +261,9 @@ def add_continuous_target(
     price_col: str = "average",
     target_col: str = "target_continuous",
 ) -> pl.DataFrame:
-    return df.with_columns(pl.col(price_col).alias(target_col)).drop_nulls([target_col])
+    return df.with_columns(
+        (pl.col(price_col).truediv(pl.col(price_col).shift(1))).log().alias(target_col)
+    ).drop_nulls([target_col])
 
 
 def add_prediction_targets(

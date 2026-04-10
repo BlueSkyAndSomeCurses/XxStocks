@@ -19,7 +19,7 @@ def _():
     import pandas as pd
     import numpy as np
 
-    return StandardScaler, TSNE, np, pd, pl, px, umap
+    return PCA, StandardScaler, np, pd, pl, px, umap
 
 
 @app.cell
@@ -114,14 +114,30 @@ def _(bag_of_words_prep, bow_with_categories, category_columns, pl):
     )
 
     rolling_category_counts = (
-        bow_with_categories.rolling("Dat", period="1mo")    
+        bow_with_categories.rolling("Date", period="1mo")
         .agg([pl.col(column).sum().alias(f"{column}_count") for column in category_columns])
         .fill_null(0)
         .sort("Date")
     )
 
-    rolling_features = rolling_bag_of_words.join(rolling_category_counts, on="Date", how="left")
+    rolling_features = rolling_bag_of_words.join(
+        rolling_category_counts, on="Date", how="left"
+    )
     return (rolling_bag_of_words,)
+
+
+@app.cell
+def _(bag_of_words_prep, pl):
+    dynamic_bag_of_words = (
+        bag_of_words_prep.group_by_dynamic("Date", every="3mo", group_by="Tokens")
+        .agg(pl.len().alias("Count"))
+        .group_by("Date", "Tokens")
+        .agg(pl.len().alias("Count"))
+        .pivot("Tokens", values="Count", index="Date")
+        .fill_null(0)
+        .sort("Date")
+    )
+    return (dynamic_bag_of_words,)
 
 
 @app.cell
@@ -184,28 +200,29 @@ def _(mo):
 
 
 @app.cell
-def _(StandardScaler, TSNE, rolling_bag_of_words):
-    rolling_bow_no_date = rolling_bag_of_words.drop("Date").to_pandas()
+def _(PCA, dynamic_bag_of_words):
+    dynamic_bow_no_date = dynamic_bag_of_words.drop("Date").to_pandas()
 
-    perplexity = min(30, max(5, rolling_bow_no_date.shape[0] // 3 - 1))
-    X_tsne = TSNE(
-        n_components=3, perplexity=perplexity, init="pca", random_state=42
-    ).fit_transform(StandardScaler().fit_transform(rolling_bow_no_date))
-    # X_pca = PCA(n_components=3, random_state=42).fit_transform(dynamic_bow_no_date)
-    return X_tsne, rolling_bow_no_date
+    # perplexity = min(30, max(5, rolling_bow_no_date.shape[0] // 3 - 1))
+    # X_tsne = TSNE(
+    # n_components=3, perplexity=perplexity, init="pca", random_state=42
+    # ).fit_transform(StandardScaler().fit_transform(rolling_bow_no_date))
+    X_pca = PCA(n_components=3, random_state=42).fit_transform(dynamic_bow_no_date)
+    return (dynamic_bow_no_date,)
 
 
 @app.cell
-def _(dynamic_bag_of_words, np, pd, rolling_bow_no_date):
+def _(dynamic_bag_of_words, dynamic_bow_no_date, np, pd):
     TOP_K_WORDS_IN_HOVER = 6
     feature_names = dynamic_bag_of_words.columns[1:]
     month_index = dynamic_bag_of_words.to_pandas()["Date"].astype(str)
 
     X_counts_pd = pd.DataFrame(
-        rolling_bow_no_date.values.astype(float),
+        dynamic_bow_no_date.values.astype(float),
         index=month_index,
         columns=feature_names,
     )
+
 
     def top_k_words(row, k=TOP_K_WORDS_IN_HOVER):
         vals = row.values
@@ -216,9 +233,8 @@ def _(dynamic_bag_of_words, np, pd, rolling_bow_no_date):
             [f"{feature_names[i]}({int(vals[i])})" for i in idx if vals[i] > 0]
         )
 
-    hover_top = X_counts_pd.apply(
-        lambda r: top_k_words(r, TOP_K_WORDS_IN_HOVER), axis=1
-    )
+
+    hover_top = X_counts_pd.apply(lambda r: top_k_words(r, TOP_K_WORDS_IN_HOVER), axis=1)
     return hover_top, month_index
 
 
@@ -252,8 +268,10 @@ def _(X_tsne, hover_top, mo, month_index, pd, px):
 
 
 @app.cell
-def _(StandardScaler, dynamic_bag_of_words, umap):
-    matrix_pd = dynamic_bag_of_words.to_pandas()
+def _(StandardScaler, dynamic_bag_of_words, pl, umap):
+    matrix_pd = dynamic_bag_of_words.with_columns(
+        pl.col("Date").dt.date().dt.to_string()
+    ).to_pandas()
 
     dates = matrix_pd["Date"]
     X = matrix_pd.drop(columns=["Date"]).values
@@ -285,7 +303,7 @@ def _(dates, embedding, mo, pd, px):
         y="umap2",
         z="umap3",
         text="Date",
-        title="UMAP projection of monthly political vocabulary",
+        title="UMAP projection of 3 monthly political vocabulary",
     )
 
     figure_umap.update_traces(textposition="top center")

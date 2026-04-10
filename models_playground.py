@@ -33,7 +33,7 @@ def _():
         time_train_test_split,
         get_bag_of_words,
         get_category_features,
-        combine_numerical_and_text_data
+        combine_numerical_and_text_data,
     )
     from models.fincast import (
         BinaryFinCast,
@@ -45,12 +45,15 @@ def _():
     from models.lstm import LSTMModel
     from models.sarimax import forecast_sarimax, train_sarimax
 
+    from statsmodels.tsa.statespace.sarimax import SARIMAXResults
+
     return (
         BinaryFinCast,
         BinaryFinCastConfig,
         ContinuousFinCast,
         ContinuousFinCastConfig,
         LSTMModel,
+        SARIMAXResults,
         augment_dataset,
         combine_numerical_and_text_data,
         downsample_to_interval,
@@ -87,13 +90,13 @@ def _(augment_dataset, downsample_to_interval, pl):
 
 @app.cell
 def _(dictionary, get_bag_of_words, twitter_posts):
-    text_feature_extracted = get_bag_of_words(twitter_posts, dictionary, "15d")
+    text_feature_extracted = get_bag_of_words(twitter_posts, dictionary, "1d")
     return (text_feature_extracted,)
 
 
 @app.cell
 def _(dictionary, get_category_features, text_feature_extracted):
-    category_features = get_category_features(text_feature_extracted, dictionary) 
+    category_features = get_category_features(text_feature_extracted, dictionary)
     return (category_features,)
 
 
@@ -162,8 +165,14 @@ def _(sarimax_cont):
 
 
 @app.cell
-def _(X_test_cont, forecast_sarimax, np, sarimax_cont):
-    pred_cont = np.asarray(forecast_sarimax(sarimax_cont, X_test_cont)).reshape(-1)
+def _(SARIMAXResults):
+    sarimax_cont_trained = SARIMAXResults.load("data/models_checkpoints/sarmix_1")
+    return (sarimax_cont_trained,)
+
+
+@app.cell
+def _(X_test_cont, forecast_sarimax, np, sarimax_cont_trained):
+    pred_cont = np.asarray(forecast_sarimax(sarimax_cont_trained, X_test_cont)).reshape(-1)
     return (pred_cont,)
 
 
@@ -171,23 +180,33 @@ def _(X_test_cont, forecast_sarimax, np, sarimax_cont):
 def _(evaluate_predictions, pred_cont, y_test_cont):
     metrics_sarimax_cont = evaluate_predictions(
         y_test_cont.to_numpy(), pred_cont, task="continuous"
-     )
+    )
     print("SARIMAX continuous metrics:")
     print(metrics_sarimax_cont)
     return
 
 
 @app.cell
-def _(
-    X_test_bin,
-    X_train_bin,
-    forecast_sarimax,
-    np,
-    train_sarimax,
-    y_train_bin,
-):
-    sarimax_bin = train_sarimax(y_train_bin, X_train_bin, order=(1, 0, 1))
-    raw_pred_bin = np.asarray(forecast_sarimax(sarimax_bin, X_test_bin)).reshape(-1)
+def _(X_train_bin, train_sarimax, y_train_bin):
+    sarimax_bin = train_sarimax(y_train_bin, X_train_bin, order=(3, 1, 3))
+    return (sarimax_bin,)
+
+
+@app.cell
+def _(sarimax_bin):
+    sarimax_bin.save("data/models_checkpoints/sarimax_bin_1")
+    return
+
+
+@app.cell
+def _(SARIMAXResults):
+    sarimax_bin_trained = SARIMAXResults.load("data/models_checkpoints/sarimax_bin_1")
+    return (sarimax_bin_trained,)
+
+
+@app.cell
+def _(X_test_bin, forecast_sarimax, np, sarimax_bin_trained):
+    raw_pred_bin = np.asarray(forecast_sarimax(sarimax_bin_trained, X_test_bin)).reshape(-1)
     pred_bin = np.where(raw_pred_bin >= 0, 1, -1)
     return (pred_bin,)
 
@@ -196,7 +215,7 @@ def _(
 def _(evaluate_predictions, pred_bin, y_test_bin):
     metrics_sarimax_bin = evaluate_predictions(
         y_test_bin.to_numpy(), pred_bin, task="binary"
-     )
+    )
     print("SARIMAX binary metrics:")
     print(metrics_sarimax_bin)
     return
@@ -367,10 +386,23 @@ def _(
         optimizer_binary,
         device,
         task="binary",
-        epochs=20,
+        epochs=40,
         patience=5,
      )
     return (lstm_binary,)
+
+
+@app.cell
+def _(lstm_binary, torch):
+    torch.save(lstm_binary.state_dict(), "data/models_checkpoints/lstm_binary_1")
+    return
+
+
+@app.cell
+def _(LSTMModel, device, input_dim, torch):
+    lstm_binary_trained = LSTMModel(input_dim=input_dim, hidden_dim=64, layer_dim=2, output_dim=1).to(device)
+    lstm_binary_trained.load_state_dict(torch.load("data/models_checkpoints/lstm_binary_1", weights_only=True))
+    return
 
 
 @app.cell
@@ -406,16 +438,29 @@ def _(
         optimizer_continuous,
         device,
         task="continuous",
-        epochs=20,
+        epochs=40,
         patience=5,
      )
     return (lstm_continuous,)
 
 
 @app.cell
-def _(device, evaluate_torch_model, lstm_continuous, test_loader_cont):
+def _(lstm_continuous, torch):
+    torch.save(lstm_continuous.state_dict(), "data/models_checkpoints/lstm_continuous_1")
+    return
+
+
+@app.cell
+def _(LSTMModel, device, input_dim, torch):
+    lstm_continuous_trained = LSTMModel(input_dim=input_dim, hidden_dim=64, layer_dim=2, output_dim=1).to(device)
+    lstm_continuous_trained.load_state_dict(torch.load("data/models_checkpoints/lstm_continuous_1", weights_only=True))
+    return (lstm_continuous_trained,)
+
+
+@app.cell
+def _(device, evaluate_torch_model, lstm_continuous_trained, test_loader_cont):
     metrics_lstm_continuous = evaluate_torch_model(
-        lstm_continuous, test_loader_cont, device, task="continuous"
+        lstm_continuous_trained, test_loader_cont, device, task="continuous"
      )
     print("LSTM continuous metrics:")
     print(metrics_lstm_continuous)

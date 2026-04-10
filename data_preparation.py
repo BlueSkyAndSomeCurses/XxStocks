@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.20.4"
+__generated_with = "0.22.4"
 app = marimo.App(width="medium")
 
 
@@ -12,17 +12,31 @@ def _():
 
     import unicodedata
     import nltk
-    from nltk.corpus import stopwords
+    from nltk.corpus import stopwords, words
     from nltk.stem import WordNetLemmatizer
 
     from sklearn.preprocessing import StandardScaler
 
     from cleantext import clean
+    from spellchecker import SpellChecker
     import json
+    import re
 
     import os
 
-    return Path, clean, json, nltk, os, pl, unicodedata, xdk
+    return (
+        Path,
+        SpellChecker,
+        clean,
+        json,
+        nltk,
+        os,
+        pl,
+        re,
+        unicodedata,
+        words,
+        xdk,
+    )
 
 
 @app.cell
@@ -158,9 +172,7 @@ def _(mo):
 def _(client, user_names_with_ids):
     all_posts = []
     for author in user_names_with_ids:
-        posts_response = client.users.get_posts(
-            author["id"], tweet_fields=["author_id", "created_at", "id", "text"]
-        )
+        posts_response = client.users.get_posts(author["id"], tweet_fields=["author_id", "created_at", "id", "text"])
 
         for post in posts_response:
             post_data = getattr(post, "data", []) or []
@@ -170,9 +182,7 @@ def _(client, user_names_with_ids):
 
 @app.cell
 def _(all_posts, pl, random_entry):
-    pl.DataFrame(all_posts).drop("edit_history_tweet_ids").write_csv(
-        random_entry / "one_author_posts.csv"
-    )
+    pl.DataFrame(all_posts).drop("edit_history_tweet_ids").write_csv(random_entry / "one_author_posts.csv")
     return
 
 
@@ -206,13 +216,7 @@ def _(excluded_topics, general_inquirer, interest_topics, pl):
             & pl.any_horizontal(pl.col(excluded_topics).is_null())
         )
         .select(["Entry", *interest_topics])
-        .with_columns(
-            pl.col("Entry")
-            .str.to_lowercase()
-            .str.splitn("#", 2)
-            .struct.field("field_0")
-            .alias("EntryCleaned")
-        )
+        .with_columns(pl.col("Entry").str.to_lowercase().str.splitn("#", 2).struct.field("field_0").alias("EntryCleaned"))
         .unique("EntryCleaned", keep="first")
         .drop("Entry")
     )
@@ -227,9 +231,7 @@ def _(general_inquirer_relevant_words, mo):
 
 @app.cell
 def _(general_inquirer_relevant_words):
-    general_inquirer_relevant_words.write_csv(
-        "data/final_data/dictionary/cleaned_dict.csv"
-    )
+    general_inquirer_relevant_words.write_csv("data/final_data/dictionary/cleaned_dict.csv")
     return
 
 
@@ -244,6 +246,7 @@ def _(mo):
 @app.cell
 def _(nltk):
     nltk.download("stopwords", quiet=True)
+    nltk.download("words", quiet=True)
     nltk.download("wordnet", quiet=True)
     nltk.download("omw-1.4", quiet=True)
     return
@@ -262,6 +265,7 @@ def _(clean, pl, political_tweets):
         pl.col("date").str.to_datetime(),
         pl.col("text")
         .str.to_lowercase()
+        .str.replace_all(r'http[s]?://\S+|www\.\S+', '')
         .map_elements(
             lambda text: clean(
                 text,
@@ -291,9 +295,8 @@ def _(pl, political_tweets_cleaned, unicodedata):
         text = unicodedata.normalize("NFKC", text)
         return text
 
-    political_tweets_norm = political_tweets_cleaned.with_columns(
-        pl.col("Text").map_elements(normalize_text)
-    )
+
+    political_tweets_norm = political_tweets_cleaned.with_columns(pl.col("Text").map_elements(normalize_text))
     return normalize_text, political_tweets_norm
 
 
@@ -311,6 +314,7 @@ def _(clean, normalize_text, pl):
             pl.lit("Trump").alias("UserName"),
             pl.col("date").str.to_datetime(),
             pl.col("text")
+            .str.replace_all(r'http[s]?://\S+|www\.\S+', '')
             .str.to_lowercase()
             .map_elements(
                 lambda text: clean(
@@ -319,7 +323,7 @@ def _(clean, normalize_text, pl):
                     stopwords=True,
                     numbers=True,
                     punct=True,
-                ),
+                ) if text and str(text).strip() else "",
                 return_dtype=pl.String,
             ),
         )
@@ -353,9 +357,7 @@ def _(json):
 @app.cell
 def _(congress_tweets, pl):
     tweets_congress_table = (
-        pl.DataFrame(
-            congress_tweets, schema=["created_at", "screen_name", "text", "user_id"]
-        )
+        pl.DataFrame(congress_tweets, schema=["created_at", "screen_name", "text", "user_id"])
         .rename({"created_at": "Date", "screen_name": "UserName", "text": "Text"})
         .with_columns(pl.from_epoch("Date", time_unit="s"))
     )
@@ -367,6 +369,7 @@ def _(clean, normalize_text, pl, tweets_congress_table):
     tweets_congress_table_norm = tweets_congress_table.with_columns(
         pl.col("Text")
         .str.to_lowercase()
+        .str.replace_all(r'http[s]?://\S+|www\.\S+', '')
         .map_elements(
             lambda text: clean(
                 text,
@@ -374,7 +377,7 @@ def _(clean, normalize_text, pl, tweets_congress_table):
                 stopwords=True,
                 numbers=True,
                 punct=True,
-            ),
+            ) if text and str(text).strip() else "",
             return_dtype=pl.String,
         ),
     ).with_columns(pl.col("Text").map_elements(normalize_text))
@@ -407,14 +410,77 @@ def _(
 
 @app.cell
 def _(full_twitter_data, mo):
-
     mo.ui.dataframe(full_twitter_data)
     return
 
 
 @app.cell
-def _(full_twitter_data):
-    full_twitter_data.write_csv("data/final_data/train/twitter_final.csv")
+def _(SpellChecker, re, words):
+    english_vocab = set(w.lower() for w in words.words())
+    spell = SpellChecker()
+
+    def remove_nonsense_words(text):
+        if not text:
+            return ""
+
+        tokens = text.split()
+        valid_tokens = []
+
+        for word in tokens:
+            if len(word) <= 2:
+                if word in {'up', 'us', 'uk', 'go', 'no', 'qe'}:
+                    valid_tokens.append(word)
+                continue
+
+            if word in english_vocab:
+                valid_tokens.append(word)
+                continue
+
+            vowels = "aeiouy"
+            if not any(char in vowels for char in word):
+                continue
+
+            if re.search(r'(.)\1\1\1', word):
+                continue
+
+            unknown = spell.unknown([word])
+            if len(unknown) == 0:
+                valid_tokens.append(word)
+
+        return " ".join(valid_tokens)
+
+    return (remove_nonsense_words,)
+
+
+@app.cell
+def _(full_twitter_data, pl, remove_nonsense_words):
+    full_twitter_cleaned = full_twitter_data.with_columns(
+        pl.col("Text").map_elements(remove_nonsense_words, return_dtype=pl.String).alias("cleaned_message")
+    ).with_columns(
+        pl.col("Date")
+        .dt.replace_time_zone("UTC")                  # Tell Polars it is currently UTC
+        .dt.convert_time_zone("US/Mountain")          # Convert to Mountain Time
+    )
+    return (full_twitter_cleaned,)
+
+
+@app.cell
+def _(full_twitter_cleaned, mo):
+    mo.ui.dataframe(full_twitter_cleaned)
+    return
+
+
+@app.cell
+def _(full_twitter_cleaned):
+    full_twitter_cleaned.write_csv("data/final_data/train/twitter_final.csv")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Cleaning non-english words
+    """)
     return
 
 
