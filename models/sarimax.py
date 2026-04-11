@@ -18,6 +18,9 @@ def train_sarimax(
         exog=exog,
         order=order,
         seasonal_order=seasonal_order,
+        # time_varying_regression=True,
+        # mle_regression=False,
+        # simple_differencing=True,
         enforce_stationarity=False,
         enforce_invertibility=False,
     )

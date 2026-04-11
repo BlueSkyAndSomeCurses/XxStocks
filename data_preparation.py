@@ -259,6 +259,12 @@ def _(pl):
 
 
 @app.cell
+def _(political_tweets):
+    political_tweets
+    return
+
+
+@app.cell
 def _(clean, pl, political_tweets):
     political_tweets_cleaned = political_tweets.select(
         "user_name",

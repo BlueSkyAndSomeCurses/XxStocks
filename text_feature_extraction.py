@@ -55,12 +55,6 @@ def _(pl):
 
 
 @app.cell
-def _(dictionary, mo):
-    mo.ui.dataframe(dictionary.head())
-    return
-
-
-@app.cell
 def _(dictionary, pl):
     category_columns = [col_name for col_name in dictionary.columns if col_name != "EntryCleaned"]
 
@@ -95,7 +89,7 @@ def _(category_columns, dict_flags, dict_words, pl, twitter_posts_tokenized):
 
 @app.cell
 def _(bow_with_categories):
-    bow_with_categories
+    bow_with_categories.head()
     return
 
 
@@ -237,6 +231,72 @@ def _(csv, get_words_category, mo, stage2_approved_tokens):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
+    ### Adding 2 stage dictionary words
+    """)
+    return
+
+
+@app.cell
+def _(pl):
+    dict_2stage = pl.read_csv("./data/final_data/dictionary/stage2_dictionary_other_half.csv")
+    dict_2stage_words = dict_2stage ["word"].to_list()
+    return dict_2stage, dict_2stage_words
+
+
+@app.cell
+def _(dict_2stage, dict_2stage_words, pl, twitter_posts_tokenized):
+    bag_of_words_2stage_prep = (
+        twitter_posts_tokenized.explode("Tokens")
+        .filter(pl.col("Tokens").is_not_null())
+        .filter(pl.col("Tokens").ne(""))
+        .with_columns(pl.col("Tokens").is_in(dict_2stage_words).alias("TokensStage2"))
+        .sort("Date")
+    )
+
+    bow_with_categories_2stage = (
+        bag_of_words_2stage_prep
+        .filter(pl.col("TokensStage2").eq(True))
+        .join(dict_2stage, left_on="Tokens", right_on="word", how="left")
+        .with_columns(
+            pl.col("category"),
+            pl.when(
+                pl.col("category").str.contains("Rudementary")
+            ).then(pl.lit("Rudementary"))
+            .when(
+                pl.col("category").str.contains("Polit")
+            ).then(pl.lit("Polit@"))
+            .when(
+                pl.col("category").str.contains("Legal")
+            ).then(pl.lit("Legal"))
+            .when(
+                pl.col("category").str.contains("Exch")
+            ).then(pl.lit("Exch"))
+            .when(
+                pl.col("category").str.contains("PowTot")
+            ).then(pl.lit("PowTot"))
+            .when(
+                pl.col("category").str.contains("Econ")
+            ).then(pl.lit("Econ@"))
+            .when(
+                pl.col("category").str.contains("ECON")
+            ).then(pl.lit("ECON"))
+            .otherwise(pl.col("category"))
+            .fill_null("Rudementary")
+            .alias("category_clean")
+        ).drop("category").rename({"category_clean": "category"})
+        .pivot(
+            index=["Date", "UserName", "Text"], # The columns to group by
+            on="category",                      # The column whose unique values become new columns
+            values="Tokens",                     # The column to aggregate
+            aggregate_function="len"            # 'len' counts the number of occurrences
+        ).fill_null(0)
+    )
+    return (bow_with_categories_2stage,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
     ### Combining with numerical data
     """)
     return
@@ -253,22 +313,38 @@ def _(augment_dataset, downsample_to_interval, pl):
 
 
 @app.cell
-def _(bow_with_categories):
-    bow_with_categories
-    return
-
-
-@app.cell
-def _(bow_with_categories, df_augmented, pl):
-    bow_with_time_stamps = bow_with_categories.join_asof(
-        df_augmented.select(pl.col("date").alias("TimeBin")), strategy="forward", left_on="Date", right_on="TimeBin"
+def _(bow_with_categories, category_columns, df_augmented, pl):
+    bow_with_time_stamps = (
+        bow_with_categories.join_asof(
+            df_augmented.select(pl.col("date").alias("TimeBin")), strategy="forward", left_on="Date", right_on="TimeBin"
+        )
+        .group_by("TimeBin")
+        .agg(pl.col(f"{category}Stage1").sum() for category in category_columns)
     )
     return (bow_with_time_stamps,)
 
 
 @app.cell
-def _(bow_with_time_stamps):
-    bow_with_time_stamps
+def _(bow_with_categories_2stage, category_columns, df_augmented, pl):
+    bow_with_time_stamps_2stage = (
+        bow_with_categories_2stage.join_asof(
+            df_augmented.select(pl.col("date").alias("TimeBin")), strategy="forward", left_on="Date", right_on="TimeBin"
+        )
+        .group_by("TimeBin")
+        .agg(pl.col(f"{category}").sum().alias(f"{category}Stage2") for category in [*category_columns, "Rudementary"])
+    )
+    return (bow_with_time_stamps_2stage,)
+
+
+@app.cell
+def _(bow_with_time_stamps, bow_with_time_stamps_2stage):
+    bow_final_30m = bow_with_time_stamps.join(bow_with_time_stamps_2stage, on="TimeBin")
+    return (bow_final_30m,)
+
+
+@app.cell
+def _(bow_final_30m):
+    bow_final_30m.write_parquet("./data/final_data/train/bow_2stages_30m.parquet")
     return
 
 

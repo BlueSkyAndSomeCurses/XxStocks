@@ -10,6 +10,8 @@ from sklearn.metrics import (
     precision_score,
     r2_score,
     recall_score,
+    root_mean_squared_error,
+    mean_absolute_percentage_error,
 )
 
 
@@ -72,21 +74,20 @@ def evaluate_predictions(y_true, y_pred, task: str = "binary") -> dict[str, floa
 
     if task in {"continuous", "non-binary", "non_binary"}:
         mae = mean_absolute_error(y_true_arr, y_pred_arr)
-        rmse = float(np.sqrt(mean_squared_error(y_true_arr, y_pred_arr)))
+        rmse = root_mean_squared_error(y_true_arr, y_pred_arr)
         r2 = r2_score(y_true_arr, y_pred_arr)
 
-        denom = np.where(np.abs(y_true_arr) < 1e-8, np.nan, np.abs(y_true_arr))
-        mape = np.abs((y_true_arr - y_pred_arr) / denom)
-        mape = float(np.nanmean(mape)) if np.isfinite(np.nanmean(mape)) else float("nan")
+        mape = mean_absolute_percentage_error(y_true_arr, y_pred_arr)
 
         directional_accuracy = directional_accuracy_from_prices(y_true_arr, y_pred_arr)
 
         return {
             "mae": float(mae),
             "rmse": rmse,
+
             "r2": float(r2),
             "mape": mape,
-            "directional_accuracy": directional_accuracy,
+            "directional_accuracy (MDA)": directional_accuracy,
         }
 
     raise ValueError("task must be either 'binary' or 'continuous'.")

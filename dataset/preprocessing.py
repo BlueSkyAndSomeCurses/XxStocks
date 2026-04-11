@@ -70,7 +70,7 @@ def augment_dataset(df: pl.DataFrame) -> pl.DataFrame:
         )
         .truediv(pl.col("average"))
         .alias("average_true_range"),
-        pl.col("close").sub(pl.col("close").shift(1)).alias("change"),
+        pl.col("close").diff().alias("change"),
     ]
 
     dataset_with_features = (
@@ -82,7 +82,7 @@ def augment_dataset(df: pl.DataFrame) -> pl.DataFrame:
             .alias("gain"),
             pl.when(pl.col("change").ge(0))
             .then(pl.lit(0))
-            .otherwise(pl.col("change"))
+            .otherwise(pl.lit(-1.0).mul(pl.col("change")))
             .alias("loss"),
         )
         .with_columns(
@@ -224,19 +224,22 @@ def get_category_features(
 def combine_numerical_and_text_data(
     stock_augmented_data: pl.DataFrame, text_with_features: pl.DataFrame
 ) -> pl.DataFrame:
-    combined_data = stock_augmented_data.join_asof(
-        text_with_features, left_on="date", right_on="Date", strategy="backward"
-    ).rename({"date": "TradeDate"})
+    combined_data = stock_augmented_data.join(
+        text_with_features, left_on="date", right_on="TimeBin", how="left"
+    ).rename({"date": "TradeDate"}).fill_null(0)
+
+    category_columns = [col_name for col_name in combined_data.columns if "Rudementary" not in col_name and col_name != "TradeDate"] 
 
     combined_data = combined_data.with_columns(
-        [
+        *[
             pl.col(category_column)
             .mul(pl.col(index_column))
             .alias(f"{category_column} * {index_column}")
-            for category_column in ["EconomicWords", "Milit", "Polit@", "PowTot"]
+            for category_column in category_columns
             for index_column in ["RSI", "RVI"]
-        ]
-    ).drop_nulls()
+        ],
+        pl.col("TradeDate").diff().truediv(pl.duration(minutes=30)).floor().cast(pl.UInt64).fill_null(0).alias("DateDiff")
+    )
 
     return combined_data
 
@@ -262,7 +265,7 @@ def add_continuous_target(
     target_col: str = "target_continuous",
 ) -> pl.DataFrame:
     return df.with_columns(
-        (pl.col(price_col).truediv(pl.col(price_col).shift(1))).log().alias(target_col)
+        (pl.col(price_col).shift(-1).truediv(pl.col(price_col))).log().alias(target_col)
     ).drop_nulls([target_col])
 
 
@@ -314,7 +317,7 @@ def prepare_arima_data(
     else:
         raise ValueError("task must be either 'binary' or 'continuous'.")
 
-    drop_cols = ["date", "target_binary", "target_continuous"]
+    drop_cols = ["date", "TimeBin", "TradeDate", "target_binary", "target_continuous"]
     exog_cols = [c for c in prepared.columns if c not in drop_cols and c != target_col]
 
     y = prepared.get_column(target_col)

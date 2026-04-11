@@ -13,7 +13,7 @@
 
 import marimo
 
-__generated_with = "0.20.4"
+__generated_with = "0.22.4"
 app = marimo.App(width="medium")
 
 
@@ -45,6 +45,11 @@ def _():
     from models.lstm import LSTMModel
     from models.sarimax import forecast_sarimax, train_sarimax
 
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import Pipeline
+    from sklearn.decomposition import PCA
+    from sklearn import set_config
+
     from statsmodels.tsa.statespace.sarimax import SARIMAXResults
 
     return (
@@ -53,24 +58,30 @@ def _():
         ContinuousFinCast,
         ContinuousFinCastConfig,
         LSTMModel,
-        SARIMAXResults,
+        PCA,
+        Pipeline,
+        StandardScaler,
         augment_dataset,
         combine_numerical_and_text_data,
         downsample_to_interval,
         evaluate_predictions,
         forecast_sarimax,
-        get_bag_of_words,
-        get_category_features,
         make_dataloader,
         nn,
         np,
         optim,
         pl,
         prepare_arima_data,
-        time_train_test_split,
+        set_config,
         torch,
         train_sarimax,
     )
+
+
+@app.cell
+def _(set_config):
+    set_config(transform_output="polars")
+    return
 
 
 @app.cell
@@ -82,66 +93,27 @@ def _(augment_dataset, downsample_to_interval, pl):
 
 
     dictionary = pl.read_csv("data/final_data/dictionary/cleaned_dict.csv")
-    twitter_posts = pl.read_csv("data/final_data/train/twitter_final.csv").with_columns(
-        pl.col("Date").str.to_datetime()
-    )
-    return df_augmented, dictionary, twitter_posts
+    category_text_data = pl.read_parquet("data/final_data/train/bow_2stages_30m.parquet")
+    return category_text_data, df_augmented
 
 
 @app.cell
-def _(dictionary, get_bag_of_words, twitter_posts):
-    text_feature_extracted = get_bag_of_words(twitter_posts, dictionary, "1d")
-    return (text_feature_extracted,)
-
-
-@app.cell
-def _(dictionary, get_category_features, text_feature_extracted):
-    category_features = get_category_features(text_feature_extracted, dictionary)
-    return (category_features,)
-
-
-@app.cell
-def _(category_features):
-    category_features
-    return
-
-
-@app.cell
-def _(category_features, combine_numerical_and_text_data, df_augmented):
-    combined_data = combine_numerical_and_text_data(df_augmented, category_features)
+def _(category_text_data, combine_numerical_and_text_data, df_augmented):
+    combined_data = combine_numerical_and_text_data(df_augmented, category_text_data)
     return (combined_data,)
 
 
 @app.cell
 def _(combined_data):
-    combined_data
+    data_len = combined_data.height
+    step = int(data_len * 0.2)
+    return data_len, step
+
+
+@app.cell
+def _(data_len, step):
+    data_len, step
     return
-
-
-@app.cell
-def _(combined_data, time_train_test_split):
-    train_df, test_df = time_train_test_split(combined_data, test_ratio=0.2)
-    print(train_df.shape, test_df.shape)
-    return test_df, train_df
-
-
-@app.cell
-def _(prepare_arima_data, test_df, train_df):
-    y_train_cont, X_train_cont = prepare_arima_data(train_df, task="continuous")
-    y_test_cont, X_test_cont = prepare_arima_data(test_df, task="continuous")
-
-    y_train_bin, X_train_bin = prepare_arima_data(train_df, task="binary")
-    y_test_bin, X_test_bin = prepare_arima_data(test_df, task="binary")
-    return (
-        X_test_bin,
-        X_test_cont,
-        X_train_bin,
-        X_train_cont,
-        y_test_bin,
-        y_test_cont,
-        y_train_bin,
-        y_train_cont,
-    )
 
 
 @app.cell(hide_code=True)
@@ -153,71 +125,97 @@ def _(mo):
 
 
 @app.cell
-def _(X_train_cont, train_sarimax, y_train_cont):
-    sarimax_cont = train_sarimax(y_train_cont, X_train_cont, order=(3, 1, 3))
-    return (sarimax_cont,)
+def _():
+    sarimax_model_cont_path = "data/models_checkpoints/sarmix_cont_3"
+    sarimax_model_bin_path = "data/models_checkpoints/sarmix_bin_3"
+    return sarimax_model_bin_path, sarimax_model_cont_path
 
 
 @app.cell
-def _(sarimax_cont):
-    sarimax_cont.save("data/models_checkpoints/sarmix_1")
+def _(PCA, Pipeline, StandardScaler):
+    feature_processor = Pipeline([("scaler", StandardScaler()), ("pca", PCA(n_components=50))])
+    return (feature_processor,)
+
+
+@app.cell
+def _(
+    combined_data,
+    data_len,
+    evaluate_predictions,
+    feature_processor,
+    forecast_sarimax,
+    prepare_arima_data,
+    sarimax_model_cont_path,
+    step,
+    train_sarimax,
+):
+    for train_end_idx in range(step, data_len, step):
+
+        if data_len - train_end_idx < 1000:
+            continue
+    
+        train_part = combined_data.slice(0, train_end_idx)
+        test_part = combined_data.slice(train_end_idx, step)
+
+
+        print("Step", train_end_idx, step)
+
+        y_train_cont, X_train_cont = prepare_arima_data(train_part, task="continuous")
+        y_test_cont, X_test_cont = prepare_arima_data(test_part, task="continuous")
+
+        X_train_transformed = feature_processor.fit_transform(X_train_cont)
+        X_test_transformed = feature_processor.transform(X_test_cont)
+
+        sarimax_cont = train_sarimax(y_train_cont, X_train_transformed, order=(3, 0, 3), disp=10)
+
+        sarimax_cont.save(sarimax_model_cont_path)
+
+        pred_cont = forecast_sarimax(sarimax_cont, X_test_transformed)
+
+        metrics_sarimax_cont = evaluate_predictions(y_test_cont.to_numpy(), pred_cont, task="continuous")
+
+        print("SARIMAX continuous metrics:")
+        print(metrics_sarimax_cont)
     return
 
 
 @app.cell
-def _(SARIMAXResults):
-    sarimax_cont_trained = SARIMAXResults.load("data/models_checkpoints/sarmix_1")
-    return (sarimax_cont_trained,)
+def _(
+    combined_data,
+    data_len,
+    evaluate_predictions,
+    feature_processor,
+    forecast_sarimax,
+    prepare_arima_data,
+    sarimax_model_bin_path,
+    step,
+    train_sarimax,
+):
+    for train_end_idx_bin in range(step, data_len, step):
 
+        if data_len - train_end_idx_bin < 1000:
+            continue
+    
+        train_part_bin = combined_data.slice(0, train_end_idx_bin)
+        test_part_bin = combined_data.slice(train_end_idx_bin, train_end_idx_bin + step)
 
-@app.cell
-def _(X_test_cont, forecast_sarimax, np, sarimax_cont_trained):
-    pred_cont = np.asarray(forecast_sarimax(sarimax_cont_trained, X_test_cont)).reshape(-1)
-    return (pred_cont,)
+        print("Step", train_end_idx_bin, step)
 
+        y_train_bin, X_train_bin = prepare_arima_data(train_part_bin, task="binary")
+        y_test_bin, X_test_bin = prepare_arima_data(test_part_bin, task="binary")
 
-@app.cell
-def _(evaluate_predictions, pred_cont, y_test_cont):
-    metrics_sarimax_cont = evaluate_predictions(
-        y_test_cont.to_numpy(), pred_cont, task="continuous"
-    )
-    print("SARIMAX continuous metrics:")
-    print(metrics_sarimax_cont)
-    return
+        X_train_transformed_bin = feature_processor.fit_transform(X_train_bin)
+        X_test_transformed_bin = feature_processor.transform(X_test_bin)
 
+        sarimax_bin = train_sarimax(y_train_bin, X_train_transformed_bin, order=(3, 0, 3), disp=15)
 
-@app.cell
-def _(X_train_bin, train_sarimax, y_train_bin):
-    sarimax_bin = train_sarimax(y_train_bin, X_train_bin, order=(3, 1, 3))
-    return (sarimax_bin,)
+        sarimax_bin.save(sarimax_model_bin_path)
 
+        pred_bin = forecast_sarimax(sarimax_bin, X_test_transformed_bin)
 
-@app.cell
-def _(sarimax_bin):
-    sarimax_bin.save("data/models_checkpoints/sarimax_bin_1")
-    return
-
-
-@app.cell
-def _(SARIMAXResults):
-    sarimax_bin_trained = SARIMAXResults.load("data/models_checkpoints/sarimax_bin_1")
-    return (sarimax_bin_trained,)
-
-
-@app.cell
-def _(X_test_bin, forecast_sarimax, np, sarimax_bin_trained):
-    raw_pred_bin = np.asarray(forecast_sarimax(sarimax_bin_trained, X_test_bin)).reshape(-1)
-    pred_bin = np.where(raw_pred_bin >= 0, 1, -1)
-    return (pred_bin,)
-
-
-@app.cell
-def _(evaluate_predictions, pred_bin, y_test_bin):
-    metrics_sarimax_bin = evaluate_predictions(
-        y_test_bin.to_numpy(), pred_bin, task="binary"
-    )
-    print("SARIMAX binary metrics:")
-    print(metrics_sarimax_bin)
+        metrics_sarimax_bin = evaluate_predictions(y_test_bin.to_numpy(), pred_bin, task="binary")
+        print("SARIMAX binary metrics:")
+        print(metrics_sarimax_bin)
     return
 
 
@@ -262,11 +260,52 @@ def _(make_dataloader, test_df, torch, train_df):
 
 
 @app.cell
+def _(
+    combined_data,
+    data_len,
+    evaluate_predictions,
+    feature_processor,
+    forecast_sarimax,
+    prepare_arima_data,
+    sarimax_model_bin_path,
+    step,
+    train_sarimax,
+):
+    for train_end_idx_bin in range(step, data_len, step):
+
+        if data_len - train_end_idx_bin < 1000:
+            continue
+    
+        train_part_bin = combined_data.slice(0, train_end_idx_bin)
+        test_part_bin = combined_data.slice(train_end_idx_bin, train_end_idx_bin + step)
+
+        print("Step", train_end_idx_bin, step)
+
+        y_train_bin, X_train_bin = prepare_arima_data(train_part_bin, task="binary")
+        y_test_bin, X_test_bin = prepare_arima_data(test_part_bin, task="binary")
+
+        X_train_transformed_bin = feature_processor.fit_transform(X_train_bin)
+        X_test_transformed_bin = feature_processor.transform(X_test_bin)
+
+        sarimax_bin = train_sarimax(y_train_bin, X_train_transformed_bin, order=(3, 0, 3), disp=15)
+
+        sarimax_bin.save(sarimax_model_bin_path)
+
+        pred_bin = forecast_sarimax(sarimax_bin, X_test_transformed_bin)
+
+        metrics_sarimax_bin = evaluate_predictions(y_test_bin.to_numpy(), pred_bin, task="binary")
+        print("SARIMAX binary metrics:")
+        print(metrics_sarimax_bin)
+    return
+
+
+@app.cell
 def _(evaluate_predictions, np, torch):
     def _extract_primary_output(model_out):
         if isinstance(model_out, tuple):
             return model_out[0]
         return model_out
+
 
     def train_generic(
         model,
@@ -278,7 +317,7 @@ def _(evaluate_predictions, np, torch):
         task="binary",
         epochs=20,
         patience=5,
-     ):
+    ):
         best_val = float("inf")
         stale_epochs = 0
         best_state = None
@@ -334,6 +373,7 @@ def _(evaluate_predictions, np, torch):
         if best_state is not None:
             model.load_state_dict(best_state)
 
+
     def evaluate_torch_model(model, data_loader, device, task="binary"):
         model.eval()
         all_true = []
@@ -387,29 +427,27 @@ def _(
         device,
         task="binary",
         epochs=40,
-        patience=5,
-     )
+        patience=15,
+    )
     return (lstm_binary,)
 
 
 @app.cell
 def _(lstm_binary, torch):
-    torch.save(lstm_binary.state_dict(), "data/models_checkpoints/lstm_binary_1")
+    torch.save(lstm_binary.state_dict(), "data/models_checkpoints/lstm_binary_2")
     return
 
 
 @app.cell
 def _(LSTMModel, device, input_dim, torch):
     lstm_binary_trained = LSTMModel(input_dim=input_dim, hidden_dim=64, layer_dim=2, output_dim=1).to(device)
-    lstm_binary_trained.load_state_dict(torch.load("data/models_checkpoints/lstm_binary_1", weights_only=True))
+    lstm_binary_trained.load_state_dict(torch.load("data/models_checkpoints/lstm_binary_2", weights_only=True))
     return
 
 
 @app.cell
 def _(device, evaluate_torch_model, lstm_binary, test_loader_bin):
-    metrics_lstm_binary = evaluate_torch_model(
-        lstm_binary, test_loader_bin, device, task="binary"
-     )
+    metrics_lstm_binary = evaluate_torch_model(lstm_binary, test_loader_bin, device, task="binary")
     print("LSTM binary metrics:")
     print(metrics_lstm_binary)
     return
@@ -439,29 +477,27 @@ def _(
         device,
         task="continuous",
         epochs=40,
-        patience=5,
-     )
+        patience=15,
+    )
     return (lstm_continuous,)
 
 
 @app.cell
 def _(lstm_continuous, torch):
-    torch.save(lstm_continuous.state_dict(), "data/models_checkpoints/lstm_continuous_1")
+    torch.save(lstm_continuous.state_dict(), "data/models_checkpoints/lstm_continuous_2")
     return
 
 
 @app.cell
 def _(LSTMModel, device, input_dim, torch):
     lstm_continuous_trained = LSTMModel(input_dim=input_dim, hidden_dim=64, layer_dim=2, output_dim=1).to(device)
-    lstm_continuous_trained.load_state_dict(torch.load("data/models_checkpoints/lstm_continuous_1", weights_only=True))
+    lstm_continuous_trained.load_state_dict(torch.load("data/models_checkpoints/lstm_continuous_2", weights_only=True))
     return (lstm_continuous_trained,)
 
 
 @app.cell
 def _(device, evaluate_torch_model, lstm_continuous_trained, test_loader_cont):
-    metrics_lstm_continuous = evaluate_torch_model(
-        lstm_continuous_trained, test_loader_cont, device, task="continuous"
-     )
+    metrics_lstm_continuous = evaluate_torch_model(lstm_continuous_trained, test_loader_cont, device, task="continuous")
     print("LSTM continuous metrics:")
     print(metrics_lstm_continuous)
     return
@@ -485,9 +521,7 @@ def _(nn, torch):
             self.freq_id = freq_id
 
         def forward(self, x):
-            freq_id = torch.full(
-                (x.size(0),), self.freq_id, dtype=torch.long, device=x.device
-            )
+            freq_id = torch.full((x.size(0),), self.freq_id, dtype=torch.long, device=x.device)
             out = self.base_model(x=x, freq_id=freq_id)
             return out[self.output_key].view(-1, 1), None, None
 
@@ -515,9 +549,7 @@ def _(
         dropout=0.1,
     )
     fincast_bin_backbone = BinaryFinCast(fincast_bin_config).to(device)
-    fincast_bin_model = FinCastAdapter(
-        fincast_bin_backbone, output_key="logits", freq_id=0
-    ).to(device)
+    fincast_bin_model = FinCastAdapter(fincast_bin_backbone, output_key="logits", freq_id=0).to(device)
     fincast_bin_criterion = nn.BCEWithLogitsLoss()
     fincast_bin_optimizer = optim.Adam(fincast_bin_model.parameters(), lr=1e-4)
 
@@ -530,9 +562,7 @@ def _(
         dropout=0.1,
     )
     fincast_cont_backbone = ContinuousFinCast(fincast_cont_config).to(device)
-    fincast_cont_model = FinCastAdapter(
-        fincast_cont_backbone, output_key="prediction", freq_id=0
-    ).to(device)
+    fincast_cont_model = FinCastAdapter(fincast_cont_backbone, output_key="prediction", freq_id=0).to(device)
     fincast_cont_criterion = nn.MSELoss()
     fincast_cont_optimizer = optim.Adam(fincast_cont_model.parameters(), lr=1e-4)
     return (
@@ -595,15 +625,11 @@ def _(
     test_loader_bin,
     test_loader_cont,
 ):
-    metrics_fincast_binary = evaluate_torch_model(
-        fincast_bin_model, test_loader_bin, device, task="binary"
-     )
+    metrics_fincast_binary = evaluate_torch_model(fincast_bin_model, test_loader_bin, device, task="binary")
     print("Binary FinCast metrics:")
     print(metrics_fincast_binary)
 
-    metrics_fincast_continuous = evaluate_torch_model(
-        fincast_cont_model, test_loader_cont, device, task="continuous"
-     )
+    metrics_fincast_continuous = evaluate_torch_model(fincast_cont_model, test_loader_cont, device, task="continuous")
     print("Continuous FinCast metrics:")
     print(metrics_fincast_continuous)
     return
