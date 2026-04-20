@@ -2,6 +2,20 @@ import polars as pl
 
 # ,date,open,high,low,close,volume,barCount,average
 
+# Absolute price / level columns that must never be fed to a model whose
+# target is a return: they are essentially the denominator of the target and
+# create a trivial-looking dependency that masquerades as predictive power
+# (this was the source of the suspiciously strong "baseline" SARIMAX).
+PRICE_LEVEL_COLUMNS: tuple[str, ...] = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "average",
+    "volume",
+    "barCount",
+)
+
 
 def downsample_to_interval(df: pl.DataFrame, interval: str = "30m") -> pl.DataFrame:
     if "date" not in df.columns:
@@ -59,10 +73,12 @@ def downsample_to_interval(df: pl.DataFrame, interval: str = "30m") -> pl.DataFr
 
 def augment_dataset(df: pl.DataFrame) -> pl.DataFrame:
     new_cols = [
-        (pl.col("high") - pl.col("low")).alias("highLow"),
-        (pl.col("open") - pl.col("close")).alias("openClose"),
-        (pl.col("high") - pl.col("open")).alias("highOpen"),
-        (pl.col("close") - pl.col("low")).alias("closeLow"),
+        # Bar-shape features expressed as ratios so they are scale-invariant
+        # and do not leak the absolute price level into downstream models.
+        ((pl.col("high") - pl.col("low")) / pl.col("average")).alias("hl_range_pct"),
+        ((pl.col("open") - pl.col("close")) / pl.col("average")).alias("oc_body_pct"),
+        ((pl.col("high") - pl.col("open")) / pl.col("average")).alias("upper_wick_pct"),
+        ((pl.col("close") - pl.col("low")) / pl.col("average")).alias("lower_wick_pct"),
         pl.max_horizontal(
             pl.col("high").sub(pl.col("low")),
             pl.col("high").sub(pl.col("close").shift(1)).abs(),
@@ -71,6 +87,15 @@ def augment_dataset(df: pl.DataFrame) -> pl.DataFrame:
         .truediv(pl.col("average"))
         .alias("average_true_range"),
         pl.col("close").diff().alias("change"),
+        # Log-returns at multiple lags – the only safe way to expose price
+        # dynamics to the model without leaking the level itself.
+        (pl.col("average").log() - pl.col("average").shift(1).log()).alias("ret_1"),
+        (pl.col("average").log() - pl.col("average").shift(2).log()).alias("ret_2"),
+        (pl.col("average").log() - pl.col("average").shift(4).log()).alias("ret_4"),
+        (pl.col("average").log() - pl.col("average").shift(8).log()).alias("ret_8"),
+        (pl.col("average").log() - pl.col("average").shift(16).log()).alias("ret_16"),
+        # Log-volume keeps order-flow info but normalises scale.
+        (pl.col("volume").cast(pl.Float64) + 1.0).log().alias("log_volume"),
     ]
 
     dataset_with_features = (
@@ -228,7 +253,15 @@ def combine_numerical_and_text_data(
         text_with_features, left_on="date", right_on="TimeBin", how="left"
     ).rename({"date": "TradeDate"}).fill_null(0)
 
-    category_columns = [col_name for col_name in combined_data.columns if "Rudementary" not in col_name and col_name != "TradeDate"] 
+    # Building <col> * RSI / <col> * RVI products on absolute price columns
+    # would simply re-introduce the leakage we just removed via
+    # PRICE_LEVEL_COLUMNS, so we restrict the cross-products to safe inputs.
+    excluded = set(PRICE_LEVEL_COLUMNS) | {"TradeDate", "RSI", "RVI"}
+    category_columns = [
+        col_name
+        for col_name in combined_data.columns
+        if "Rudementary" not in col_name and col_name not in excluded
+    ]
 
     combined_data = combined_data.with_columns(
         *[
@@ -281,24 +314,35 @@ def label_data(df: pl.DataFrame) -> pl.DataFrame:
     return add_binary_target(df).rename({"target_binary": "target"})
 
 
+def _resolve_target_col(task: str) -> str:
+    if task == "binary":
+        return "target_binary"
+    if task in {"continuous", "non-binary", "non_binary"}:
+        return "target_continuous"
+    raise ValueError("task must be either 'binary' or 'continuous'.")
+
+
+def _drop_leaky_columns(df: pl.DataFrame, extra: list[str]) -> pl.DataFrame:
+    """Strip absolute-level price columns plus any caller-supplied date /
+    target columns. Keeping ``average`` etc. would let the model (especially
+    SARIMAX with linear exog) regress the target onto its own denominator."""
+    candidates = list(PRICE_LEVEL_COLUMNS) + extra
+    existing = [c for c in candidates if c in df.columns]
+    return df.drop(existing)
+
+
 def split_features_target(
     df: pl.DataFrame,
     task: str = "binary",
     price_col: str = "average",
 ):
     prepared = add_prediction_targets(df, price_col=price_col)
+    target_col = _resolve_target_col(task)
 
-    if task == "binary":
-        target_col = "target_binary"
-    elif task in {"continuous", "non-binary", "non_binary"}:
-        target_col = "target_continuous"
-    else:
-        raise ValueError("task must be either 'binary' or 'continuous'.")
-
-    drop_cols = ["date", price_col, "target_binary", "target_continuous"]
-    existing_drop_cols = [col for col in drop_cols if col in prepared.columns]
-
-    X = prepared.drop(existing_drop_cols)
+    X = _drop_leaky_columns(
+        prepared,
+        extra=["date", "TimeBin", "TradeDate", "target_binary", "target_continuous"],
+    )
     y = prepared.select(target_col)
     return X, y
 
@@ -309,19 +353,13 @@ def prepare_arima_data(
     price_col: str = "average",
 ):
     prepared = add_prediction_targets(df, price_col=price_col)
+    target_col = _resolve_target_col(task)
 
-    if task == "binary":
-        target_col = "target_binary"
-    elif task in {"continuous", "non-binary", "non_binary"}:
-        target_col = "target_continuous"
-    else:
-        raise ValueError("task must be either 'binary' or 'continuous'.")
-
-    drop_cols = ["date", "TimeBin", "TradeDate", "target_binary", "target_continuous"]
-    exog_cols = [c for c in prepared.columns if c not in drop_cols and c != target_col]
-
+    X = _drop_leaky_columns(
+        prepared,
+        extra=["date", "TimeBin", "TradeDate", "target_binary", "target_continuous"],
+    )
     y = prepared.get_column(target_col)
-    X = prepared.select(exog_cols)
     return y, X
 
 

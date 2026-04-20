@@ -6,6 +6,7 @@
 #     "polars==1.39.3",
 #     "pyzmq>=27.1.0",
 #     "scikit-learn==1.8.0",
+#     "scipy>=1.13",
 #     "statsmodels==0.14.6",
 #     "torch==2.10.0",
 # ]
@@ -43,7 +44,7 @@ def _():
     )
     from models.evaluation import evaluate_predictions
     from models.lstm import LSTMModel
-    from models.sarimax import forecast_sarimax, train_sarimax
+    from models.sarimax import forecast_sarimax, rolling_one_step_forecast, train_sarimax
 
     from sklearn.preprocessing import StandardScaler
     from sklearn.pipeline import Pipeline
@@ -72,7 +73,9 @@ def _():
         optim,
         pl,
         prepare_arima_data,
+        rolling_one_step_forecast,
         set_config,
+        time_train_test_split,
         torch,
         train_sarimax,
     )
@@ -143,8 +146,8 @@ def _(
     data_len,
     evaluate_predictions,
     feature_processor,
-    forecast_sarimax,
     prepare_arima_data,
+    rolling_one_step_forecast,
     sarimax_model_cont_path,
     step,
     train_sarimax,
@@ -153,7 +156,7 @@ def _(
 
         if data_len - train_end_idx < 1000:
             continue
-    
+
         train_part = combined_data.slice(0, train_end_idx)
         test_part = combined_data.slice(train_end_idx, step)
 
@@ -170,7 +173,7 @@ def _(
 
         sarimax_cont.save(sarimax_model_cont_path)
 
-        pred_cont = forecast_sarimax(sarimax_cont, X_test_transformed)
+        pred_cont = rolling_one_step_forecast(sarimax_cont, y_test_cont, X_test_transformed)
 
         metrics_sarimax_cont = evaluate_predictions(y_test_cont.to_numpy(), pred_cont, task="continuous")
 
@@ -185,8 +188,8 @@ def _(
     data_len,
     evaluate_predictions,
     feature_processor,
-    forecast_sarimax,
     prepare_arima_data,
+    rolling_one_step_forecast,
     sarimax_model_bin_path,
     step,
     train_sarimax,
@@ -195,7 +198,7 @@ def _(
 
         if data_len - train_end_idx_bin < 1000:
             continue
-    
+
         train_part_bin = combined_data.slice(0, train_end_idx_bin)
         test_part_bin = combined_data.slice(train_end_idx_bin, train_end_idx_bin + step)
 
@@ -211,7 +214,7 @@ def _(
 
         sarimax_bin.save(sarimax_model_bin_path)
 
-        pred_bin = forecast_sarimax(sarimax_bin, X_test_transformed_bin)
+        pred_bin = rolling_one_step_forecast(sarimax_bin, y_test_bin, X_test_transformed_bin)
 
         metrics_sarimax_bin = evaluate_predictions(y_test_bin.to_numpy(), pred_bin, task="binary")
         print("SARIMAX binary metrics:")
@@ -228,6 +231,13 @@ def _(mo):
 
 
 @app.cell
+def _(combined_data, time_train_test_split):
+    train_df, test_df = time_train_test_split(combined_data, test_ratio=0.2)
+    print(f"DL split – train: {train_df.height} rows, test: {test_df.height} rows")
+    return test_df, train_df
+
+
+@app.cell
 def _(make_dataloader, test_df, torch, train_df):
     window_size = 32
     batch_size = 128
@@ -237,14 +247,16 @@ def _(make_dataloader, test_df, torch, train_df):
         train_df, task="binary", window_size=window_size, batch_size=batch_size, shuffle=False, drop_last=True
     )
     test_loader_bin = make_dataloader(
-        test_df, task="binary", window_size=window_size, batch_size=batch_size, shuffle=False, drop_last=False
+        test_df, task="binary", window_size=window_size, batch_size=batch_size, shuffle=False, drop_last=False,
+        scaler=train_loader_bin.dataset.scaler,
     )
 
     train_loader_cont = make_dataloader(
         train_df, task="continuous", window_size=window_size, batch_size=batch_size, shuffle=False, drop_last=True
     )
     test_loader_cont = make_dataloader(
-        test_df, task="continuous", window_size=window_size, batch_size=batch_size, shuffle=False, drop_last=False
+        test_df, task="continuous", window_size=window_size, batch_size=batch_size, shuffle=False, drop_last=False,
+        scaler=train_loader_cont.dataset.scaler,
     )
 
     input_dim = train_loader_bin.dataset.X.shape[1]
@@ -265,17 +277,19 @@ def _(
     data_len,
     evaluate_predictions,
     feature_processor,
-    forecast_sarimax,
     prepare_arima_data,
+    rolling_one_step_forecast,
     sarimax_model_bin_path,
     step,
     train_sarimax,
 ):
+    # NOTE: this cell is a duplicate of the binary SARIMAX block above –
+    # kept for backwards compatibility with previously cached marimo state.
     for train_end_idx_bin in range(step, data_len, step):
 
         if data_len - train_end_idx_bin < 1000:
             continue
-    
+
         train_part_bin = combined_data.slice(0, train_end_idx_bin)
         test_part_bin = combined_data.slice(train_end_idx_bin, train_end_idx_bin + step)
 
@@ -291,7 +305,7 @@ def _(
 
         sarimax_bin.save(sarimax_model_bin_path)
 
-        pred_bin = forecast_sarimax(sarimax_bin, X_test_transformed_bin)
+        pred_bin = rolling_one_step_forecast(sarimax_bin, y_test_bin, X_test_transformed_bin)
 
         metrics_sarimax_bin = evaluate_predictions(y_test_bin.to_numpy(), pred_bin, task="binary")
         print("SARIMAX binary metrics:")
