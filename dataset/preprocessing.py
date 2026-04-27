@@ -277,6 +277,26 @@ def combine_numerical_and_text_data(
     return combined_data
 
 
+def combine_numerical_and_bert_embeddings(
+    stock_augmented_data: pl.DataFrame,
+    bert_embeddings: pl.DataFrame,
+) -> pl.DataFrame:
+    """Left-join per-bar BERT vectors (``text_embed_*``) onto OHLCV rows on ``date`` / ``TimeBin``.
+
+    Rows without tweets get zeros on all ``text_embed_*`` columns.
+    """
+    joined = stock_augmented_data.join(
+        bert_embeddings,
+        left_on="date",
+        right_on="TimeBin",
+        how="left",
+    )
+    text_cols = [c for c in joined.columns if c.startswith("text_embed_")]
+    if text_cols:
+        joined = joined.with_columns([pl.col(c).fill_null(0.0) for c in text_cols])
+    return joined
+
+
 def add_binary_target(
     df: pl.DataFrame,
     price_col: str = "average",

@@ -1,33 +1,26 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "marimo>=0.23.3",
+# ]
+# ///
+
 import marimo
 
-__generated_with = "0.22.4"
+__generated_with = "0.23.3"
 app = marimo.App(width="medium")
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""
-    # Neural text encoder for tweet features
+    mo.md(r"""
+    # BERT per-bin tweet embeddings
 
-    This notebook is the interactive twin of `text_encoder_script.py`. It is
-    an alternative to the lexicon / bag-of-words pipeline implemented in
-    `text_feature_extraction.py`.
-
-    Instead of mapping each token to a Harvard IV-4 category and counting,
-    we:
-
-    1. Pretrain a small bidirectional Transformer (`TweetEncoder`) on the
-       tweet corpus with **masked language modelling**.
-    2. Embed each individual tweet with the trained encoder.
-    3. Aggregate the per-tweet embeddings inside every 30-minute `TimeBin`
-       with `TimeBinAggregator` – attention pooling against a learnable
-       query token.
-    4. Save one dense vector per bin to a parquet file that can be joined
-       alongside the OHLCV features just like the existing bag-of-words
-       parquet.
-    """
-    )
+    Interactive version of `text_encoder_script.py`. Uses **Hugging Face**
+    `AutoModel` / `AutoTokenizer` (default `bert-base-uncased`) — no custom
+    encoder training. Each tweet is embedded with BERT; tweets in the same
+    30-minute `TimeBin` are pooled with `TimeBinAggregator`.
+    """)
     return
 
 
@@ -36,44 +29,25 @@ def _():
     import numpy as np
     import polars as pl
     import torch
-    from torch import nn, optim
     from torch.utils.data import DataLoader
+    from transformers import AutoConfig, AutoTokenizer
 
     from dataset.preprocessing import augment_dataset, downsample_to_interval
-    from dataset.text_dataset import (
-        MLMTweetDataset,
-        TimeBinTweetDataset,
-        TokenizerConfig,
-        WhitespaceTokenizer,
-        collate_time_bin_batch,
-    )
-    from models.text_encoder import (
-        MLMHead,
-        TextEncoderPipeline,
-        TimeBinAggregator,
-        TimeBinAggregatorConfig,
-        TweetEncoder,
-        TweetEncoderConfig,
-    )
+    from dataset.text_dataset import TimeBinTweetDataset, collate_time_bin_batch
+    from models.text_encoder import BertTimeBinPipeline, TimeBinAggregator, TimeBinAggregatorConfig
 
     return (
+        AutoConfig,
+        AutoTokenizer,
+        BertTimeBinPipeline,
         DataLoader,
-        MLMHead,
-        MLMTweetDataset,
-        TextEncoderPipeline,
         TimeBinAggregator,
         TimeBinAggregatorConfig,
         TimeBinTweetDataset,
-        TokenizerConfig,
-        TweetEncoder,
-        TweetEncoderConfig,
-        WhitespaceTokenizer,
         augment_dataset,
         collate_time_bin_batch,
         downsample_to_interval,
-        nn,
         np,
-        optim,
         pl,
         torch,
     )
@@ -92,9 +66,20 @@ def _(torch):
     return (device,)
 
 
+@app.cell
+def _():
+    MODEL_NAME = "bert-base-uncased"
+    MAX_SEQ_LEN = 128
+    MAX_TWEETS_PER_BIN = 32
+    INFER_BATCH = 8
+    return INFER_BATCH, MAX_SEQ_LEN, MAX_TWEETS_PER_BIN, MODEL_NAME
+
+
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(r"""## 1. Load tweets""")
+    mo.md(r"""
+    ## 1. Load tweets
+    """)
     return
 
 
@@ -116,115 +101,42 @@ def _(pl):
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""
-    ## 2. Fit the whitespace tokenizer
-
-    Text was already lowercased / cleaned in `data_preparation.py`, so a
-    plain whitespace split with a frequency-pruned vocabulary is enough.
-    """
-    )
+    mo.md(r"""
+    ## 2. Tokenizer and BERT + aggregator
+    """)
     return
 
 
 @app.cell
-def _(TokenizerConfig, WhitespaceTokenizer, tweets):
-    tokenizer_config = TokenizerConfig(
-        max_seq_len=64,
-        min_token_freq=5,
-        max_vocab_size=30_000,
-    )
-    tokenizer = WhitespaceTokenizer.fit(tweets["Text"].to_list(), tokenizer_config)
-    print(f"vocab_size = {len(tokenizer)}")
-    return (tokenizer,)
+def _(
+    AutoConfig,
+    AutoTokenizer,
+    BertTimeBinPipeline,
+    MODEL_NAME,
+    TimeBinAggregator,
+    TimeBinAggregatorConfig,
+    device,
+    mo,
+):
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    hf_cfg = AutoConfig.from_pretrained(MODEL_NAME)
+    d_model = int(hf_cfg.hidden_size)
+
+    aggregator = TimeBinAggregator(
+        TimeBinAggregatorConfig(d_model=d_model, n_heads=12)
+    ).to(device)
+    pipeline = BertTimeBinPipeline(MODEL_NAME, aggregator).to(device)
+    pipeline.eval()
+
+    mo.md(f"Hidden size **{d_model}**, output dim **{pipeline.out_dim}**.")
+    return pipeline, tokenizer
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(r"""## 3. Build the encoder""")
-    return
-
-
-@app.cell
-def _(TweetEncoder, TweetEncoderConfig, device, tokenizer):
-    encoder_config = TweetEncoderConfig(
-        vocab_size=len(tokenizer),
-        max_seq_len=tokenizer.config.max_seq_len,
-        d_model=128,
-        n_heads=4,
-        n_layers=4,
-        dropout=0.1,
-        pad_token_id=tokenizer.pad_token_id,
-        cls_token_id=tokenizer.cls_token_id,
-        mask_token_id=tokenizer.mask_token_id,
-    )
-    encoder = TweetEncoder(encoder_config).to(device)
-    n_params = sum(p.numel() for p in encoder.parameters())
-    print(f"encoder parameters: {n_params:,}")
-    return (encoder,)
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(
-        r"""
-    ## 4. Self-supervised pretraining (MLM)
-
-    Standard 80 / 10 / 10 BERT recipe over the tweet corpus.
-    """
-    )
-    return
-
-
-@app.cell
-def _(MLMHead, MLMTweetDataset, encoder, device, tokenizer, tweets):
-    head = MLMHead(encoder).to(device)
-    mlm_dataset = MLMTweetDataset(
-        tweets["Text"].to_list(), tokenizer, mlm_probability=0.15
-    )
-    print(f"MLM dataset size = {len(mlm_dataset)}")
-    return head, mlm_dataset
-
-
-@app.cell
-def _(DataLoader, encoder, head, mlm_dataset, nn, optim, torch, device):
-    EPOCHS = 1
-    BATCH_SIZE = 256
-    LR = 3e-4
-
-    loader = DataLoader(mlm_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-    params = list(encoder.parameters()) + list(head.parameters())
-    optimizer = optim.AdamW(params, lr=LR, weight_decay=1e-2)
-    criterion = nn.CrossEntropyLoss(ignore_index=-100)
-
-    encoder.train()
-    head.train()
-    for epoch in range(EPOCHS):
-        running = 0.0
-        seen = 0
-        for batch in loader:
-            ids = batch["token_ids"].to(device)
-            attn = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-
-            optimizer.zero_grad()
-            out = encoder(ids, attention_mask=attn, return_token_states=True)
-            logits = head(out["token_states"])
-            loss = criterion(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
-            optimizer.step()
-
-            running += loss.item() * ids.size(0)
-            seen += ids.size(0)
-
-        print(f"epoch {epoch + 1}/{EPOCHS}  mlm_loss={running / max(seen, 1):.4f}")
-    return
-
-
-@app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""## 5. Build 30-min `TimeBin` schedule""")
+    mo.md(r"""
+    ## 3. Thirty-minute `TimeBin` schedule
+    """)
     return
 
 
@@ -242,51 +154,44 @@ def _(augment_dataset, downsample_to_interval, pl):
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""
-    ## 6. Aggregate tweet embeddings per bin
-
-    `TimeBinAggregator` performs multi-head attention pooling against a
-    learnable query so that bins with many tweets do not blur into a mean
-    vector – the model can up-weight the more informative ones.
-    """
-    )
+    mo.md(r"""
+    ## 4. Encode and aggregate per bin
+    """)
     return
 
 
 @app.cell
 def _(
-    TextEncoderPipeline,
-    TimeBinAggregator,
-    TimeBinAggregatorConfig,
+    MAX_SEQ_LEN,
+    MAX_TWEETS_PER_BIN,
     TimeBinTweetDataset,
     bins,
-    device,
-    encoder,
     tokenizer,
     tweets,
 ):
-    aggregator = TimeBinAggregator(
-        TimeBinAggregatorConfig(
-            d_model=encoder.d_model,
-            n_heads=encoder.config.n_heads,
-        )
-    ).to(device)
-    pipeline = TextEncoderPipeline(encoder=encoder, aggregator=aggregator).to(device)
-
     bin_dataset = TimeBinTweetDataset(
         tweets=tweets,
         tokenizer=tokenizer,
         bins=bins,
-        max_tweets_per_bin=32,
+        max_seq_len=MAX_SEQ_LEN,
+        max_tweets_per_bin=MAX_TWEETS_PER_BIN,
     )
-    print(f"bins with at least one tweet: {len(bin_dataset)}")
-    return bin_dataset, pipeline
+    len(bin_dataset)
+    return (bin_dataset,)
 
 
 @app.cell
-def _(DataLoader, bin_dataset, collate_time_bin_batch, device, np, pipeline, pl, torch):
-    INFER_BATCH = 32
+def _(
+    DataLoader,
+    INFER_BATCH,
+    bin_dataset,
+    collate_time_bin_batch,
+    device,
+    np,
+    pipeline,
+    pl,
+    torch,
+):
     loader_inf = DataLoader(
         bin_dataset,
         batch_size=INFER_BATCH,
@@ -294,7 +199,6 @@ def _(DataLoader, bin_dataset, collate_time_bin_batch, device, np, pipeline, pl,
         collate_fn=collate_time_bin_batch,
     )
 
-    pipeline.eval()
     all_bins = []
     all_emb = []
     with torch.no_grad():
@@ -323,15 +227,11 @@ def _(DataLoader, bin_dataset, collate_time_bin_batch, device, np, pipeline, pl,
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""
-    ## 7. Persist the per-bin embeddings
+    mo.md(r"""
+    ## 5. Save parquet
 
-    The output schema mirrors `bow_2stages_30m.parquet` (one row per
-    `TimeBin`) so it can be joined with `combine_numerical_and_text_data`
-    by simply pointing `category_text_data` at this new parquet.
-    """
-    )
+    Same schema as before (`TimeBin` + `text_embed_*`) for joins with OHLCV.
+    """)
     return
 
 

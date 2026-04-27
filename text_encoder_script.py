@@ -1,22 +1,17 @@
-"""End-to-end script for the neural text-encoder feature extractor.
+"""Encode tweets per 30-minute time bin using Hugging Face BERT.
 
 Pipeline:
     1. Load tweets from ``data/final_data/train/twitter_final.csv``.
-    2. Fit (or load) the whitespace tokeniser.
-    3. Pretrain a small bidirectional Transformer (:class:`TweetEncoder`)
-       with masked language modelling.
-    4. Build the 30-min ``TimeBin`` schedule from the SPY OHLCV file.
-    5. Encode every tweet with the trained encoder and aggregate per bin
-       via :class:`TimeBinAggregator` (attention pooling against a learnable
-       query token).
-    6. Write the per-bin dense embeddings to
-       ``data/final_data/train/text_encoder_embeddings_30m.parquet`` so that
-       they can be joined alongside the OHLCV features in the same way the
-       lexicon-based bag-of-words features are joined today.
+    2. Load ``AutoTokenizer`` + ``AutoModel`` (default ``bert-base-uncased``).
+    3. Build the ``TimeBin`` schedule from the SPY OHLCV file.
+    4. For each bin, embed tweets with BERT and aggregate via
+       :class:`TimeBinAggregator` (attention pooling).
+    5. Write per-bin vectors to
+       ``data/final_data/train/text_encoder_embeddings_30m.parquet``.
 
-Run with::
+Run::
 
-    uv run python text_encoder_script.py --epochs 3
+    uv run python text_encoder_script.py --model-name bert-base-uncased
 """
 
 from __future__ import annotations
@@ -27,32 +22,18 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import torch
-from torch import nn, optim
 from torch.utils.data import DataLoader
+from transformers import AutoConfig, AutoTokenizer
 
 from dataset.preprocessing import augment_dataset, downsample_to_interval
-from dataset.text_dataset import (
-    MLMTweetDataset,
-    TimeBinTweetDataset,
-    TokenizerConfig,
-    WhitespaceTokenizer,
-    collate_time_bin_batch,
-)
-from models.text_encoder import (
-    MLMHead,
-    TextEncoderPipeline,
-    TimeBinAggregator,
-    TimeBinAggregatorConfig,
-    TweetEncoder,
-    TweetEncoderConfig,
-)
+from dataset.text_dataset import TimeBinTweetDataset, collate_time_bin_batch
+from models.text_encoder import BertTimeBinPipeline, TimeBinAggregator, TimeBinAggregatorConfig
 
 
 DEFAULT_TWEETS_PATH = "data/final_data/train/twitter_final.csv"
 DEFAULT_OHLCV_PATH = "data/1_min_SPY_2008-2021.csv"
 DEFAULT_OUT_PATH = "data/final_data/train/text_encoder_embeddings_30m.parquet"
-DEFAULT_TOKENIZER_PATH = "data/models_checkpoints/text_encoder_tokenizer.json"
-DEFAULT_ENCODER_CKPT = "data/models_checkpoints/text_encoder.pt"
+DEFAULT_MODEL_NAME = "bert-base-uncased"
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,20 +41,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tweets-path", default=DEFAULT_TWEETS_PATH)
     p.add_argument("--ohlcv-path", default=DEFAULT_OHLCV_PATH)
     p.add_argument("--out-path", default=DEFAULT_OUT_PATH)
-    p.add_argument("--tokenizer-path", default=DEFAULT_TOKENIZER_PATH)
-    p.add_argument("--encoder-ckpt", default=DEFAULT_ENCODER_CKPT)
+    p.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     p.add_argument("--interval", default="30m")
-    p.add_argument("--max-seq-len", type=int, default=64)
+    p.add_argument("--max-seq-len", type=int, default=128)
     p.add_argument("--max-tweets-per-bin", type=int, default=32)
-    p.add_argument("--d-model", type=int, default=128)
-    p.add_argument("--n-heads", type=int, default=4)
-    p.add_argument("--n-layers", type=int, default=4)
-    p.add_argument("--epochs", type=int, default=3)
-    p.add_argument("--batch-size", type=int, default=256)
-    p.add_argument("--inference-batch-size", type=int, default=32)
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--mlm-probability", type=float, default=0.15)
-    p.add_argument("--skip-pretraining", action="store_true")
+    p.add_argument("--n-heads", type=int, default=12)
+    p.add_argument("--inference-batch-size", type=int, default=8)
+    p.add_argument("--trust-remote-code", action="store_true")
     p.add_argument("--device", default=None)
     return p.parse_args()
 
@@ -104,62 +78,6 @@ def load_tweets(path: str) -> pl.DataFrame:
     return df.drop_nulls("Text").filter(pl.col("Text").str.len_chars() > 0)
 
 
-def fit_or_load_tokenizer(
-    texts: list[str], path: str, max_seq_len: int
-) -> WhitespaceTokenizer:
-    p = Path(path)
-    if p.exists():
-        tokenizer = WhitespaceTokenizer.load(p)
-        if tokenizer.config.max_seq_len != max_seq_len:
-            tokenizer.config.max_seq_len = max_seq_len
-        return tokenizer
-    tokenizer = WhitespaceTokenizer.fit(
-        texts, TokenizerConfig(max_seq_len=max_seq_len)
-    )
-    tokenizer.save(p)
-    return tokenizer
-
-
-def pretrain_encoder(
-    encoder: TweetEncoder,
-    head: MLMHead,
-    dataset: MLMTweetDataset,
-    *,
-    epochs: int,
-    batch_size: int,
-    lr: float,
-    device: torch.device,
-) -> None:
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
-    params = list(encoder.parameters()) + list(head.parameters())
-    optimizer = optim.AdamW(params, lr=lr, weight_decay=1e-2)
-    criterion = nn.CrossEntropyLoss(ignore_index=-100)
-
-    encoder.train()
-    head.train()
-    for epoch in range(epochs):
-        running = 0.0
-        seen = 0
-        for batch in loader:
-            ids = batch["token_ids"].to(device)
-            attn = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-
-            optimizer.zero_grad()
-            out = encoder(ids, attention_mask=attn, return_token_states=True)
-            logits = head(out["token_states"])
-            loss = criterion(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
-            optimizer.step()
-
-            running += loss.item() * ids.size(0)
-            seen += ids.size(0)
-
-        avg = running / max(seen, 1)
-        print(f"[mlm] epoch {epoch + 1}/{epochs}  loss={avg:.4f}")
-
-
 def build_time_bins(ohlcv_path: str, interval: str) -> pl.DataFrame:
     raw = pl.read_csv(ohlcv_path)
     downsampled = downsample_to_interval(raw, interval=interval)
@@ -168,7 +86,7 @@ def build_time_bins(ohlcv_path: str, interval: str) -> pl.DataFrame:
 
 
 def encode_time_bins(
-    pipeline: TextEncoderPipeline,
+    pipeline: BertTimeBinPipeline,
     dataset: TimeBinTweetDataset,
     *,
     batch_size: int,
@@ -195,7 +113,11 @@ def encode_time_bins(
             all_bins.extend(batch.time_bin)
             all_emb.append(emb.cpu().numpy())
 
-    embeddings = np.concatenate(all_emb, axis=0) if all_emb else np.zeros((0, pipeline.out_dim), dtype=np.float32)
+    embeddings = (
+        np.concatenate(all_emb, axis=0)
+        if all_emb
+        else np.zeros((0, pipeline.out_dim), dtype=np.float32)
+    )
 
     embed_cols = {
         f"text_embed_{i}": embeddings[:, i].astype(np.float32)
@@ -207,68 +129,37 @@ def encode_time_bins(
 def main() -> None:
     args = parse_args()
     device = select_device(args.device)
-    print(f"[setup] device={device}")
+    print(f"[setup] device={device} model={args.model_name}")
 
-    print(f"[load] tweets from {args.tweets_path}")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     tweets = load_tweets(args.tweets_path)
-    print(f"[load] {tweets.height} tweets")
+    print(f"[load] {tweets.height} tweets from {args.tweets_path}")
 
-    texts: list[str] = tweets["Text"].to_list()
-    tokenizer = fit_or_load_tokenizer(
-        texts, args.tokenizer_path, max_seq_len=args.max_seq_len
+    hf_cfg = AutoConfig.from_pretrained(
+        args.model_name, trust_remote_code=args.trust_remote_code
     )
-    print(f"[tokenizer] vocab_size={len(tokenizer)}")
-
-    encoder_config = TweetEncoderConfig(
-        vocab_size=len(tokenizer),
-        max_seq_len=args.max_seq_len,
-        d_model=args.d_model,
-        n_heads=args.n_heads,
-        n_layers=args.n_layers,
-        pad_token_id=tokenizer.pad_token_id,
-        cls_token_id=tokenizer.cls_token_id,
-        mask_token_id=tokenizer.mask_token_id,
-    )
-    encoder = TweetEncoder(encoder_config).to(device)
-
-    ckpt_path = Path(args.encoder_ckpt)
-    if ckpt_path.exists() and args.skip_pretraining:
-        print(f"[mlm] loading existing checkpoint {ckpt_path}")
-        encoder.load_state_dict(torch.load(ckpt_path, map_location=device))
-    else:
-        print("[mlm] pretraining encoder via masked language modelling")
-        head = MLMHead(encoder).to(device)
-        mlm_dataset = MLMTweetDataset(
-            texts, tokenizer, mlm_probability=args.mlm_probability
-        )
-        pretrain_encoder(
-            encoder,
-            head,
-            mlm_dataset,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            lr=args.lr,
-            device=device,
-        )
-        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(encoder.state_dict(), ckpt_path)
-        print(f"[mlm] saved encoder checkpoint to {ckpt_path}")
+    d_model = int(hf_cfg.hidden_size)
 
     aggregator = TimeBinAggregator(
-        TimeBinAggregatorConfig(d_model=args.d_model, n_heads=args.n_heads)
+        TimeBinAggregatorConfig(d_model=d_model, n_heads=args.n_heads)
     ).to(device)
-    pipeline = TextEncoderPipeline(encoder=encoder, aggregator=aggregator).to(device)
+    pipeline = BertTimeBinPipeline(
+        args.model_name,
+        aggregator,
+        trust_remote_code=args.trust_remote_code,
+    ).to(device)
 
-    print(f"[bins] reading 30m TimeBin schedule from {args.ohlcv_path}")
     bins = build_time_bins(args.ohlcv_path, interval=args.interval)
+    print(f"[bins] {bins.height} rows from {args.ohlcv_path}")
 
-    print("[encode] encoding tweets and aggregating per bin")
     bin_dataset = TimeBinTweetDataset(
         tweets=tweets,
         tokenizer=tokenizer,
         bins=bins,
+        max_seq_len=args.max_seq_len,
         max_tweets_per_bin=args.max_tweets_per_bin,
     )
+
     embeddings = encode_time_bins(
         pipeline,
         bin_dataset,
