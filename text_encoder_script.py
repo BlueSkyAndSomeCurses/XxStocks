@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from tqdm import tqdm
 
 import numpy as np
 import polars as pl
@@ -30,7 +31,7 @@ from dataset.text_dataset import TimeBinTweetDataset, collate_time_bin_batch
 from models.text_encoder import BertTimeBinPipeline, TimeBinAggregator, TimeBinAggregatorConfig
 
 
-DEFAULT_TWEETS_PATH = "data/final_data/train/twitter_final.csv"
+DEFAULT_TWEETS_PATH = "data/final_data/train/twitter_for_encoder_final.csv"
 DEFAULT_OHLCV_PATH = "data/1_min_SPY_2008-2021.csv"
 DEFAULT_OUT_PATH = "data/final_data/train/text_encoder_embeddings_30m.parquet"
 DEFAULT_MODEL_NAME = "bert-base-uncased"
@@ -104,7 +105,7 @@ def encode_time_bins(
     all_emb: list[np.ndarray] = []
 
     with torch.no_grad():
-        for batch in loader:
+        for batch in tqdm(loader):
             emb = pipeline(
                 batch.token_ids.to(device),
                 batch.attention_mask.to(device),

@@ -1,19 +1,17 @@
 import marimo
 
-__generated_with = "0.22.4"
+__generated_with = "0.23.3"
 app = marimo.App(width="medium")
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""
+    mo.md(r"""
     # VAE dimensionality reduction
 
     Trains :class:`models.vae.VAE` on dense vectors (synthetic Gaussian mixture by default).
     Swap in rows from ``text_encoder_embeddings_30m.parquet`` if you want to compress BERT bins.
-    """
-    )
+    """)
     return
 
 
@@ -84,7 +82,7 @@ def _(bert_path, np, pl, torch, use_bert):
     x = torch.tensor(x_np)
     input_dim = x.size(1)
     latent_dim = 16
-    return input_dim, latent_dim, n, x
+    return input_dim, latent_dim, x
 
 
 @app.cell
@@ -99,7 +97,7 @@ def _(VAEConfig, input_dim, latent_dim):
 
 
 @app.cell
-def _(DataLoader, TensorDataset, VAE, cfg, device, optim, torch, vae_elbo_loss, x):
+def _(DataLoader, TensorDataset, VAE, cfg, device, optim, vae_elbo_loss, x):
     model = VAE(cfg).to(device)
     opt = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
     loader = DataLoader(
@@ -110,7 +108,7 @@ def _(DataLoader, TensorDataset, VAE, cfg, device, optim, torch, vae_elbo_loss, 
     )
 
     model.train()
-    for epoch in range(12):
+    for epoch in range(30):
         total_loss = 0.0
         for (xb,) in loader:
             xb = xb.to(device)
@@ -122,20 +120,28 @@ def _(DataLoader, TensorDataset, VAE, cfg, device, optim, torch, vae_elbo_loss, 
             total_loss += loss.item() * xb.size(0)
         total_loss /= len(loader.dataset)
         print(f"epoch {epoch + 1}  loss={total_loss:.5f}")
-    return model, opt
+    return loader, model
 
 
 @app.cell
 def _(device, model, torch, x):
     model.eval()
     with torch.no_grad():
-        mu, _logvar = model.encode(x.to(device))
-    mu_cpu = mu.cpu()
+        mu_eval, _logvar = model.encode(x.to(device))
+    mu_cpu = mu_eval.cpu()
     latent_mean = mu_cpu.mean(dim=0)
     latent_std = mu_cpu.std(dim=0)
     print("latent dim means (first 5):", latent_mean[:5].tolist())
     print("latent dim std  (first 5):", latent_std[:5].tolist())
-    return (mu_cpu,)
+    return
+
+
+@app.cell
+def _(loader, model):
+    model.eval()
+    for (x_orig,) in loader:
+        print(x_orig.shape)
+    return
 
 
 @app.cell
@@ -144,3 +150,6 @@ def _():
 
     return (mo,)
 
+
+if __name__ == "__main__":
+    app.run()

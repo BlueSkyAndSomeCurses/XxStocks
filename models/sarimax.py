@@ -1,6 +1,7 @@
 import polars as pl
 import numpy as np
 from statsmodels.tsa.statespace.sarimax import SARIMAX, SARIMAXResults
+from tqdm import tqdm
 
 
 def train_sarimax(
@@ -18,11 +19,6 @@ def train_sarimax(
         exog=exog,
         order=order,
         seasonal_order=seasonal_order,
-        # time_varying_regression=True,
-        # mle_regression=False,
-        # simple_differencing=True,
-        enforce_stationarity=False,
-        enforce_invertibility=False,
     )
 
     return model.fit(disp=disp)
@@ -60,6 +56,8 @@ def rolling_one_step_forecast(
 
     preds = np.empty(len(endog_test), dtype=float)
     state = fitted_model
+
+    print(len(endog_test))
 
     for t in range(len(endog_test)):
         x_step = exog_test[t : t + 1]

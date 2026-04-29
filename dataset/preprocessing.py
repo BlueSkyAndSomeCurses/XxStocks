@@ -390,3 +390,18 @@ def time_train_test_split(df: pl.DataFrame, test_ratio: float = 0.2):
     train_df = df.slice(0, split_idx)
     test_df = df.slice(split_idx, n_rows - split_idx)
     return train_df, test_df
+
+
+def split_text_embeddings_and_features(
+    df: pl.DataFrame,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    embedding_cols = sorted(
+        (c for c in df.columns if c.startswith("text_embed_")),
+        key=lambda c: int(c.removeprefix("text_embed_")),
+    )
+    other_cols = [c for c in df.columns if c not in embedding_cols]
+    
+    embeddings_df = df.select(embedding_cols)
+    other_features_df = df.select(other_cols)
+    
+    return other_features_df, embeddings_df 

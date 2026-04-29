@@ -26,18 +26,12 @@ class SPYDataset(Dataset):
         data: pl.DataFrame,
         window_size: int = 16,
         task: str = "binary",
-        scaler: _FeatureScaler | None = None,
     ):
         X_df, y_df = split_features_target(data, task=task)
 
         X_np = X_df.to_numpy()
-        if scaler is None:
-            scaler = _FeatureScaler.fit(X_np)
-        self.scaler = scaler
 
-        X_scaled = scaler.transform(X_np)
-
-        self.X = torch.tensor(X_scaled, dtype=torch.float32)
+        self.X = torch.tensor(X_np, dtype=torch.float32)
         self.y = torch.tensor(
             np.asarray(y_df.to_numpy()).reshape(-1), dtype=torch.float32
         )
@@ -54,14 +48,33 @@ class SPYDataset(Dataset):
         return x_slice, y_val
 
 
+class ArrayWindowDataset(Dataset):
+    def __init__(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        window_size: int = 16,
+    ):
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.y = torch.tensor(np.asarray(y).reshape(-1), dtype=torch.float32)
+        self.window_size = window_size
+
+    def __len__(self):
+        return len(self.X) - self.window_size
+
+    def __getitem__(self, index):
+        x_slice = self.X[index : index + self.window_size]
+        y_val = self.y[index + self.window_size]
+        return x_slice, y_val
+
+
 class BinarySPYDataset(SPYDataset):
     def __init__(
         self,
         data: pl.DataFrame,
         window_size: int = 16,
-        scaler: _FeatureScaler | None = None,
     ):
-        super().__init__(data=data, window_size=window_size, task="binary", scaler=scaler)
+        super().__init__(data=data, window_size=window_size, task="binary")
 
 
 class ContinuousSPYDataset(SPYDataset):
@@ -69,30 +82,35 @@ class ContinuousSPYDataset(SPYDataset):
         self,
         data: pl.DataFrame,
         window_size: int = 16,
-        scaler: _FeatureScaler | None = None,
     ):
         super().__init__(
-            data=data, window_size=window_size, task="continuous", scaler=scaler
+            data=data, window_size=window_size, task="continuous"
         )
 
 
 def make_dataloader(
-    data: pl.DataFrame,
-    task: str,
+    data: pl.DataFrame | None = None,
+    task: str | None = None,
     window_size: int = 16,
     batch_size: int = 128,
     shuffle: bool = False,
     drop_last: bool = False,
-    scaler: _FeatureScaler | None = None,
+    X: np.ndarray | None = None,
+    y: np.ndarray | None = None,
 ) -> DataLoader:
-    if task == "binary":
-        dataset = BinarySPYDataset(data=data, window_size=window_size, scaler=scaler)
-    elif task in {"continuous", "non-binary", "non_binary"}:
-        dataset = ContinuousSPYDataset(
-            data=data, window_size=window_size, scaler=scaler
-        )
+    if X is not None and y is not None:
+        dataset = ArrayWindowDataset(X=X, y=y, window_size=window_size)
     else:
-        raise ValueError("task must be either 'binary' or 'continuous'.")
+        if data is None or task is None:
+            raise ValueError("Provide either X and y, or data and task.")
+        if task == "binary":
+            dataset = BinarySPYDataset(data=data, window_size=window_size)
+        elif task in {"continuous", "non-binary", "non_binary"}:
+            dataset = ContinuousSPYDataset(
+                data=data, window_size=window_size
+            )
+        else:
+            raise ValueError("task must be either 'binary' or 'continuous'.")
 
     return DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last

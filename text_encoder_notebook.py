@@ -34,7 +34,11 @@ def _():
 
     from dataset.preprocessing import augment_dataset, downsample_to_interval
     from dataset.text_dataset import TimeBinTweetDataset, collate_time_bin_batch
-    from models.text_encoder import BertTimeBinPipeline, TimeBinAggregator, TimeBinAggregatorConfig
+    from models.text_encoder import (
+        BertTimeBinPipeline,
+        TimeBinAggregator,
+        TimeBinAggregatorConfig,
+    )
 
     return (
         AutoConfig,

@@ -131,6 +131,7 @@ def evaluate_predictions(y_true, y_pred, task: str = "binary") -> dict[str, floa
     if task == "binary":
         y_true_cls = _binarize_sign(y_true_arr)
         y_pred_cls = _binarize_sign(y_pred_arr)
+        r2 = float(r2_score(y_true_arr, y_pred_arr))
 
         return {
             "accuracy": float(accuracy_score(y_true_cls, y_pred_cls)),
@@ -144,6 +145,7 @@ def evaluate_predictions(y_true, y_pred, task: str = "binary") -> dict[str, floa
                 recall_score(y_true_cls, y_pred_cls, pos_label=1, zero_division=0)
             ),
             "f1": float(f1_score(y_true_cls, y_pred_cls, pos_label=1, zero_division=0)),
+            "r2": r2
         }
 
     if task in {"continuous", "non-binary", "non_binary"}:
