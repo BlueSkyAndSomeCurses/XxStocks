@@ -45,8 +45,9 @@ def _():
         ContinuousFinCast,
         ContinuousFinCastConfig,
     )
-    from models.evaluation import evaluate_predictions
+    from models.evaluation import TargetScaler, evaluate_predictions
     from models.lstm import LSTMModel, rolling_one_step_forecast_lstm
+    from models.mamba import MambaConfig, MambaModel
     from models.sarimax import forecast_sarimax, rolling_one_step_forecast, train_sarimax
 
     from sklearn.preprocessing import StandardScaler
@@ -64,9 +65,12 @@ def _():
         ContinuousFinCast,
         ContinuousFinCastConfig,
         LSTMModel,
+        MambaConfig,
+        MambaModel,
         PCA,
         Pipeline,
         StandardScaler,
+        TargetScaler,
         VAEConfig,
         augment_dataset,
         combine_numerical_and_bert_embeddings,
@@ -537,6 +541,7 @@ def _(
     PCA,
     Pipeline,
     StandardScaler,
+    TargetScaler,
     batch_size,
     combined_data,
     combined_with_encoded_text,
@@ -562,6 +567,23 @@ def _(
     ## LSTM pipelines (mirroring SARIMAX preprocessing: numeric-only, PCA, VAE)
 
 
+    def _maybe_scale_targets(y_train_np, y_test_np, task: str):
+        """For the continuous task, standardise the target so the network
+        actually receives a learnable signal (raw log-returns are ~1e-3 and
+        collapse the optimiser onto "predict 0", giving R² ≤ 0). Returns the
+        arrays to feed into the loaders plus a fitted scaler used to
+        inverse-transform predictions at evaluation time.
+        """
+        if task == "binary":
+            return y_train_np, y_test_np, None
+        scaler = TargetScaler.fit(y_train_np)
+        return (
+            scaler.transform(y_train_np),
+            scaler.transform(y_test_np),
+            scaler,
+        )
+
+
     def train_lstm_numeric_only(model_path: str, task: str = "binary"):
         train_part, test_part = time_train_test_split(df_augmented, test_ratio=0.2)
 
@@ -578,9 +600,13 @@ def _(
         y_train_np = y_train.to_numpy().astype(np.float32)
         y_test_np = y_test.to_numpy().astype(np.float32)
 
+        y_train_for_train, y_test_for_train, y_scaler = _maybe_scale_targets(
+            y_train_np, y_test_np, task
+        )
+
         train_loader = make_dataloader(
             X=X_train_scaled,
-            y=y_train_np,
+            y=y_train_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=True,
@@ -588,7 +614,7 @@ def _(
         )
         test_loader = make_dataloader(
             X=X_test_scaled,
-            y=y_test_np,
+            y=y_test_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=False,
@@ -634,6 +660,8 @@ def _(
             window_size=window_size,
             device=device,
             task=task,
+            y_scaler=y_scaler,
+            y_test_orig=y_forecast,
         )
         print(f"LSTM numeric only {task} metrics:")
         print(metrics_lstm)
@@ -656,9 +684,13 @@ def _(
         y_train_np = y_train.to_numpy().astype(np.float32)
         y_test_np = y_test.to_numpy().astype(np.float32)
 
+        y_train_for_train, y_test_for_train, y_scaler = _maybe_scale_targets(
+            y_train_np, y_test_np, task
+        )
+
         train_loader = make_dataloader(
             X=X_train_processed,
-            y=y_train_np,
+            y=y_train_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=False,
@@ -666,7 +698,7 @@ def _(
         )
         test_loader = make_dataloader(
             X=X_test_processed,
-            y=y_test_np,
+            y=y_test_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=False,
@@ -709,6 +741,8 @@ def _(
             window_size=window_size,
             device=device,
             task=task,
+            y_scaler=y_scaler,
+            y_test_orig=y_test_np,
         )
         print(f"LSTM categories PCA {task} metrics:")
         print(metrics_lstm)
@@ -756,9 +790,13 @@ def _(
         y_train_np = y_train.to_numpy().astype(np.float32)
         y_test_np = y_test.to_numpy().astype(np.float32)
 
+        y_train_for_train, y_test_for_train, y_scaler = _maybe_scale_targets(
+            y_train_np, y_test_np, task
+        )
+
         train_loader = make_dataloader(
             X=X_train_combined,
-            y=y_train_np,
+            y=y_train_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=False,
@@ -766,7 +804,7 @@ def _(
         )
         test_loader = make_dataloader(
             X=X_test_combined,
-            y=y_test_np,
+            y=y_test_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=False,
@@ -809,6 +847,8 @@ def _(
             window_size=window_size,
             device=device,
             task=task,
+            y_scaler=y_scaler,
+            y_test_orig=y_test_np,
         )
         print(f"LSTM categories VAE {task} metrics:")
         print(metrics_lstm)
@@ -849,9 +889,13 @@ def _(
         y_train_np = y_train.to_numpy().astype(np.float32)
         y_test_np = y_test.to_numpy().astype(np.float32)
 
+        y_train_for_train, y_test_for_train, y_scaler = _maybe_scale_targets(
+            y_train_np, y_test_np, task
+        )
+
         train_loader = make_dataloader(
             X=X_train_combined,
-            y=y_train_np,
+            y=y_train_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=False,
@@ -859,7 +903,7 @@ def _(
         )
         test_loader = make_dataloader(
             X=X_test_combined,
-            y=y_test_np,
+            y=y_test_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=False,
@@ -902,6 +946,8 @@ def _(
             window_size=window_size,
             device=device,
             task=task,
+            y_scaler=y_scaler,
+            y_test_orig=y_test_np,
         )
         print(f"LSTM embeddings PCA {task} metrics:")
         print(metrics_lstm)
@@ -945,9 +991,13 @@ def _(
         y_train_np = y_train.to_numpy().astype(np.float32)
         y_test_np = y_test.to_numpy().astype(np.float32)
 
+        y_train_for_train, y_test_for_train, y_scaler = _maybe_scale_targets(
+            y_train_np, y_test_np, task
+        )
+
         train_loader = make_dataloader(
             X=X_train_combined,
-            y=y_train_np,
+            y=y_train_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=False,
@@ -955,7 +1005,7 @@ def _(
         )
         test_loader = make_dataloader(
             X=X_test_combined,
-            y=y_test_np,
+            y=y_test_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=False,
@@ -998,6 +1048,8 @@ def _(
             window_size=window_size,
             device=device,
             task=task,
+            y_scaler=y_scaler,
+            y_test_orig=y_test_np,
         )
         print(f"LSTM embeddings VAE {task} metrics:")
         print(metrics_lstm)
@@ -1171,22 +1223,50 @@ def _(evaluate_predictions, np, torch):
 
 @app.cell
 def _(evaluate_predictions, rolling_one_step_forecast_lstm):
-    def evaluate_lstm_rolling(model, X_test, y_test, window_size, device, task="binary"):
-        """Evaluate LSTM using rolling one-step-ahead forecast (proper time series evaluation)."""
+    def evaluate_lstm_rolling(
+        model,
+        X_test,
+        y_test,
+        window_size,
+        device,
+        task="binary",
+        y_scaler=None,
+        y_test_orig=None,
+    ):
+        """Evaluate LSTM using rolling one-step-ahead forecast (proper time series evaluation).
+
+        ``y_scaler`` (a ``TargetScaler``) and ``y_test_orig`` are used for the
+        continuous task: the model was trained on standardised targets, so we
+        inverse-transform its predictions and score them against the original
+        (unscaled) ``y_test`` to recover meaningful R² / RMSE in return units.
+        """
         preds = rolling_one_step_forecast_lstm(
             model, X_test, y_test, window_size=window_size, device=device, task=task
         )
-        return evaluate_predictions(y_test[window_size:], preds, task=task)
+        if y_scaler is not None:
+            preds = y_scaler.inverse_transform(preds)
+        eval_y = y_test_orig if y_test_orig is not None else y_test
+        return evaluate_predictions(eval_y[window_size:], preds, task=task)
 
 
     def evaluate_fincast_rolling(
-        model, X_test, y_test, window_size, device, task="binary"
-     ):
+        model,
+        X_test,
+        y_test,
+        window_size,
+        device,
+        task="binary",
+        y_scaler=None,
+        y_test_orig=None,
+    ):
         """Evaluate FinCast using rolling one-step-ahead forecast."""
         preds = rolling_one_step_forecast_lstm(
             model, X_test, y_test, window_size=window_size, device=device, task=task
         )
-        return evaluate_predictions(y_test[window_size:], preds, task=task)
+        if y_scaler is not None:
+            preds = y_scaler.inverse_transform(preds)
+        eval_y = y_test_orig if y_test_orig is not None else y_test
+        return evaluate_predictions(eval_y[window_size:], preds, task=task)
 
     return evaluate_fincast_rolling, evaluate_lstm_rolling
 
@@ -1343,6 +1423,7 @@ def _(
     PCA,
     Pipeline,
     StandardScaler,
+    TargetScaler,
     batch_size,
     combined_data,
     combined_with_encoded_text,
@@ -1415,6 +1496,20 @@ def _(
         return model, criterion, lr
 
 
+    def _maybe_scale_targets(y_train_np, y_test_np, task: str):
+        """See LSTM cell: standardise the continuous target so the optimiser
+        gets a learnable signal instead of collapsing onto "predict 0".
+        """
+        if task == "binary":
+            return y_train_np, y_test_np, None
+        scaler = TargetScaler.fit(y_train_np)
+        return (
+            scaler.transform(y_train_np),
+            scaler.transform(y_test_np),
+            scaler,
+        )
+
+
     def train_fincast_numeric_only(model_path: str, task: str = "binary"):
         train_part, test_part = time_train_test_split(df_augmented, test_ratio=0.2)
 
@@ -1428,9 +1523,13 @@ def _(
         y_train_np = y_train.to_numpy().astype(np.float32)
         y_test_np = y_test.to_numpy().astype(np.float32)
 
+        y_train_for_train, y_test_for_train, y_scaler = _maybe_scale_targets(
+            y_train_np, y_test_np, task
+        )
+
         train_loader = make_dataloader(
             X=X_train_scaled,
-            y=y_train_np,
+            y=y_train_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=True,
@@ -1438,7 +1537,7 @@ def _(
         )
         test_loader = make_dataloader(
             X=X_test_scaled,
-            y=y_test_np,
+            y=y_test_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=False,
@@ -1471,6 +1570,8 @@ def _(
             window_size=window_size,
             device=device,
             task=task,
+            y_scaler=y_scaler,
+            y_test_orig=y_forecast,
         )
         print(f"FinCast numeric only {task} metrics:")
         print(metrics_fincast)
@@ -1491,9 +1592,13 @@ def _(
         y_train_np = y_train.to_numpy().astype(np.float32)
         y_test_np = y_test.to_numpy().astype(np.float32)
 
+        y_train_for_train, y_test_for_train, y_scaler = _maybe_scale_targets(
+            y_train_np, y_test_np, task
+        )
+
         train_loader = make_dataloader(
             X=X_train_processed,
-            y=y_train_np,
+            y=y_train_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=True,
@@ -1501,7 +1606,7 @@ def _(
         )
         test_loader = make_dataloader(
             X=X_test_processed,
-            y=y_test_np,
+            y=y_test_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=False,
@@ -1534,6 +1639,8 @@ def _(
             window_size=window_size,
             device=device,
             task=task,
+            y_scaler=y_scaler,
+            y_test_orig=y_forecast,
         )
         print(f"FinCast categories PCA {task} metrics:")
         print(metrics_fincast)
@@ -1576,9 +1683,13 @@ def _(
         y_train_np = y_train.to_numpy().astype(np.float32)
         y_test_np = y_test.to_numpy().astype(np.float32)
 
+        y_train_for_train, y_test_for_train, y_scaler = _maybe_scale_targets(
+            y_train_np, y_test_np, task
+        )
+
         train_loader = make_dataloader(
             X=X_train_combined,
-            y=y_train_np,
+            y=y_train_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=True,
@@ -1586,7 +1697,7 @@ def _(
         )
         test_loader = make_dataloader(
             X=X_test_combined,
-            y=y_test_np,
+            y=y_test_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=False,
@@ -1619,6 +1730,8 @@ def _(
             window_size=window_size,
             device=device,
             task=task,
+            y_scaler=y_scaler,
+            y_test_orig=y_forecast,
         )
         print(f"FinCast categories VAE {task} metrics:")
         print(metrics_fincast)
@@ -1654,9 +1767,13 @@ def _(
         y_train_np = y_train.to_numpy().astype(np.float32)
         y_test_np = y_test.to_numpy().astype(np.float32)
 
+        y_train_for_train, y_test_for_train, y_scaler = _maybe_scale_targets(
+            y_train_np, y_test_np, task
+        )
+
         train_loader = make_dataloader(
             X=X_train_combined,
-            y=y_train_np,
+            y=y_train_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=True,
@@ -1664,7 +1781,7 @@ def _(
         )
         test_loader = make_dataloader(
             X=X_test_combined,
-            y=y_test_np,
+            y=y_test_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=False,
@@ -1697,6 +1814,8 @@ def _(
             window_size=window_size,
             device=device,
             task=task,
+            y_scaler=y_scaler,
+            y_test_orig=y_forecast,
         )
         print(f"FinCast embeddings PCA {task} metrics:")
         print(metrics_fincast)
@@ -1735,9 +1854,13 @@ def _(
         y_train_np = y_train.to_numpy().astype(np.float32)
         y_test_np = y_test.to_numpy().astype(np.float32)
 
+        y_train_for_train, y_test_for_train, y_scaler = _maybe_scale_targets(
+            y_train_np, y_test_np, task
+        )
+
         train_loader = make_dataloader(
             X=X_train_combined,
-            y=y_train_np,
+            y=y_train_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=True,
@@ -1745,7 +1868,7 @@ def _(
         )
         test_loader = make_dataloader(
             X=X_test_combined,
-            y=y_test_np,
+            y=y_test_for_train,
             window_size=window_size,
             batch_size=batch_size,
             shuffle=False,
@@ -1778,6 +1901,8 @@ def _(
             window_size=window_size,
             device=device,
             task=task,
+            y_scaler=y_scaler,
+            y_test_orig=y_forecast,
         )
         print(f"FinCast embeddings VAE {task} metrics:")
         print(metrics_fincast)
@@ -1838,6 +1963,449 @@ def _(train_fincast_embeddings_vae):
 def _(train_fincast_embeddings_vae):
     train_fincast_embeddings_vae(
         "data/models_checkpoints/fincast_emb_pca_bin", task="binary"
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Mamba pipelines (binary and continuous)
+
+    Pure-PyTorch S6 selective state-space model. Two design choices follow
+    Hu et al. (KDD 2026) "How to Train Your Mamba for Time Series
+    Forecasting": we keep the time-varying selection mechanism but disable
+    the short-conv / gating decorations by default, since they tend to
+    overfit on short TSF windows. State size ``N = 16`` matches MambaStock
+    (Shi 2024).
+    """)
+    return
+
+
+@app.cell
+def _(
+    MambaConfig,
+    MambaModel,
+    PCA,
+    Pipeline,
+    StandardScaler,
+    TargetScaler,
+    batch_size,
+    combined_data,
+    combined_with_encoded_text,
+    device,
+    df_augmented,
+    encode_with_vae,
+    evaluate_lstm_rolling,
+    make_dataloader,
+    nn,
+    np,
+    optim,
+    split_features_target,
+    split_text_embeddings_and_features,
+    time_train_test_split,
+    to_numpy,
+    torch,
+    train_and_encode_vae_dataframe,
+    train_generic,
+    vae_config,
+    vae_config_cats,
+    window_size,
+):
+    ## Mamba pipelines (mirroring LSTM / FinCast preprocessing)
+
+
+    def _make_mamba_model(task: str, input_dim: int):
+        config = MambaConfig(
+            input_dim=input_dim,
+            d_model=64,
+            d_state=16,
+            d_conv=4,
+            expand=2,
+            n_layers=2,
+            dropout=0.1,
+            use_short_conv=False,
+            use_gate=True,
+        )
+        model = MambaModel(config).to(device)
+
+        if task == "binary":
+            criterion = nn.BCEWithLogitsLoss()
+            lr = 1e-3
+        else:
+            criterion = nn.MSELoss()
+            lr = 1e-3
+        return model, criterion, lr
+
+
+    def _maybe_scale_targets_mamba(y_train_np, y_test_np, task: str):
+        """Same target-standardisation helper used by the LSTM / FinCast
+        cells. Standardise the continuous target so the regression head
+        receives a learnable signal instead of collapsing onto zero.
+        """
+        if task == "binary":
+            return y_train_np, y_test_np, None
+        scaler = TargetScaler.fit(y_train_np)
+        return (
+            scaler.transform(y_train_np),
+            scaler.transform(y_test_np),
+            scaler,
+        )
+
+
+    def train_mamba_numeric_only(model_path: str, task: str = "binary"):
+        train_part, test_part = time_train_test_split(df_augmented, test_ratio=0.2)
+
+        X_train, y_train = split_features_target(train_part, task=task)
+        X_test, y_test = split_features_target(test_part, task=task)
+
+        scaler = StandardScaler()
+        X_train_scaled = to_numpy(scaler.fit_transform(X_train))
+        X_test_scaled = to_numpy(scaler.transform(X_test))
+
+        y_train_np = y_train.to_numpy().astype(np.float32)
+        y_test_np = y_test.to_numpy().astype(np.float32)
+
+        y_train_for_train, y_test_for_train, y_scaler = _maybe_scale_targets_mamba(
+            y_train_np, y_test_np, task
+        )
+
+        train_loader = make_dataloader(
+            X=X_train_scaled,
+            y=y_train_for_train,
+            window_size=window_size,
+            batch_size=batch_size,
+            shuffle=True,
+            drop_last=False,
+        )
+        test_loader = make_dataloader(
+            X=X_test_scaled,
+            y=y_test_for_train,
+            window_size=window_size,
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=False,
+        )
+
+        model, criterion, lr = _make_mamba_model(task, X_train_scaled.shape[1])
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+
+        train_generic(
+            model,
+            train_loader,
+            test_loader,
+            criterion,
+            optimizer,
+            device,
+            task=task,
+            epochs=40,
+            patience=15,
+        )
+
+        torch.save(model.state_dict(), f"{model_path}_{task}")
+
+        X_forecast = np.vstack([X_train_scaled[-window_size:], X_test_scaled])
+        y_forecast = np.concatenate([y_train_np[-window_size:], y_test_np])
+        metrics_mamba = evaluate_lstm_rolling(
+            model,
+            X_forecast,
+            y_forecast,
+            window_size=window_size,
+            device=device,
+            task=task,
+            y_scaler=y_scaler,
+            y_test_orig=y_forecast,
+        )
+        print(f"Mamba numeric only {task} metrics:")
+        print(metrics_mamba)
+
+
+    def train_mamba_categories_pca(model_path: str, task: str = "binary"):
+        train_part, test_part = time_train_test_split(combined_data, test_ratio=0.2)
+
+        X_train, y_train = split_features_target(train_part, task=task)
+        X_test, y_test = split_features_target(test_part, task=task)
+
+        feature_processor = Pipeline(
+            [("scaler", StandardScaler()), ("pca", PCA(n_components=50))]
+        )
+        X_train_processed = to_numpy(feature_processor.fit_transform(X_train))
+        X_test_processed = to_numpy(feature_processor.transform(X_test))
+
+        y_train_np = y_train.to_numpy().astype(np.float32)
+        y_test_np = y_test.to_numpy().astype(np.float32)
+
+        y_train_for_train, y_test_for_train, y_scaler = _maybe_scale_targets_mamba(
+            y_train_np, y_test_np, task
+        )
+
+        train_loader = make_dataloader(
+            X=X_train_processed,
+            y=y_train_for_train,
+            window_size=window_size,
+            batch_size=batch_size,
+            shuffle=True,
+            drop_last=False,
+        )
+        test_loader = make_dataloader(
+            X=X_test_processed,
+            y=y_test_for_train,
+            window_size=window_size,
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=False,
+        )
+
+        model, criterion, lr = _make_mamba_model(task, X_train_processed.shape[1])
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+
+        train_generic(
+            model,
+            train_loader,
+            test_loader,
+            criterion,
+            optimizer,
+            device,
+            task=task,
+            epochs=40,
+            patience=15,
+        )
+
+        torch.save(model.state_dict(), f"{model_path}_{task}")
+
+        X_forecast = np.vstack([X_train_processed[-window_size:], X_test_processed])
+        y_forecast = np.concatenate([y_train_np[-window_size:], y_test_np])
+        metrics_mamba = evaluate_lstm_rolling(
+            model,
+            X_forecast,
+            y_forecast,
+            window_size=window_size,
+            device=device,
+            task=task,
+            y_scaler=y_scaler,
+            y_test_orig=y_forecast,
+        )
+        print(f"Mamba categories PCA {task} metrics:")
+        print(metrics_mamba)
+
+
+    def train_mamba_embeddings_pca(model_path: str, task: str = "binary"):
+        train_part, test_part = time_train_test_split(
+            combined_with_encoded_text, test_ratio=0.2
+        )
+
+        X_train, y_train = split_features_target(train_part, task=task)
+        X_test, y_test = split_features_target(test_part, task=task)
+
+        X_train_numeric, X_train_text = split_text_embeddings_and_features(X_train)
+        X_test_numeric, X_test_text = split_text_embeddings_and_features(X_test)
+
+        X_train_numeric_np = X_train_numeric.to_numpy().astype(np.float32)
+        X_train_text_np = X_train_text.to_numpy().astype(np.float32)
+        X_test_numeric_np = X_test_numeric.to_numpy().astype(np.float32)
+        X_test_text_np = X_test_text.to_numpy().astype(np.float32)
+
+        pca = PCA(n_components=30)
+        X_train_text_pca = pca.fit_transform(X_train_text_np)
+        X_test_text_pca = pca.transform(X_test_text_np)
+
+        scaler_numeric = StandardScaler()
+        X_train_numeric_scaled = to_numpy(scaler_numeric.fit_transform(X_train_numeric_np))
+        X_test_numeric_scaled = to_numpy(scaler_numeric.transform(X_test_numeric_np))
+
+        X_train_combined = np.hstack([X_train_numeric_scaled, X_train_text_pca])
+        X_test_combined = np.hstack([X_test_numeric_scaled, X_test_text_pca])
+
+        y_train_np = y_train.to_numpy().astype(np.float32)
+        y_test_np = y_test.to_numpy().astype(np.float32)
+
+        y_train_for_train, y_test_for_train, y_scaler = _maybe_scale_targets_mamba(
+            y_train_np, y_test_np, task
+        )
+
+        train_loader = make_dataloader(
+            X=X_train_combined,
+            y=y_train_for_train,
+            window_size=window_size,
+            batch_size=batch_size,
+            shuffle=True,
+            drop_last=False,
+        )
+        test_loader = make_dataloader(
+            X=X_test_combined,
+            y=y_test_for_train,
+            window_size=window_size,
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=False,
+        )
+
+        model, criterion, lr = _make_mamba_model(task, X_train_combined.shape[1])
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+
+        train_generic(
+            model,
+            train_loader,
+            test_loader,
+            criterion,
+            optimizer,
+            device,
+            task=task,
+            epochs=40,
+            patience=15,
+        )
+
+        torch.save(model.state_dict(), f"{model_path}_{task}")
+
+        X_forecast = np.vstack([X_train_combined[-window_size:], X_test_combined])
+        y_forecast = np.concatenate([y_train_np[-window_size:], y_test_np])
+        metrics_mamba = evaluate_lstm_rolling(
+            model,
+            X_forecast,
+            y_forecast,
+            window_size=window_size,
+            device=device,
+            task=task,
+            y_scaler=y_scaler,
+            y_test_orig=y_forecast,
+        )
+        print(f"Mamba embeddings PCA {task} metrics:")
+        print(metrics_mamba)
+
+
+    def train_mamba_embeddings_vae(model_path: str, task: str = "binary"):
+        train_part, test_part = time_train_test_split(
+            combined_with_encoded_text, test_ratio=0.2
+        )
+
+        X_train, y_train = split_features_target(train_part, task=task)
+        X_test, y_test = split_features_target(test_part, task=task)
+
+        X_train_numeric, X_train_text = split_text_embeddings_and_features(X_train)
+        X_test_numeric, X_test_text = split_text_embeddings_and_features(X_test)
+
+        X_train_numeric_np = X_train_numeric.to_numpy().astype(np.float32)
+        X_test_numeric_np = X_test_numeric.to_numpy().astype(np.float32)
+
+        scaler_numeric = StandardScaler()
+        X_train_numeric_scaled = to_numpy(scaler_numeric.fit_transform(X_train_numeric_np))
+        X_test_numeric_scaled = to_numpy(scaler_numeric.transform(X_test_numeric_np))
+
+        vae_model, X_train_text_vae = train_and_encode_vae_dataframe(
+            data=X_train_text, config=vae_config, text_embed_only=True
+        )
+        X_test_text_vae = encode_with_vae(vae_model, X_test_text)
+
+        X_train_combined = np.hstack(
+            [X_train_numeric_scaled, X_train_text_vae.to_numpy().astype(np.float32)]
+        )
+        X_test_combined = np.hstack(
+            [X_test_numeric_scaled, X_test_text_vae.to_numpy().astype(np.float32)]
+        )
+
+        y_train_np = y_train.to_numpy().astype(np.float32)
+        y_test_np = y_test.to_numpy().astype(np.float32)
+
+        y_train_for_train, y_test_for_train, y_scaler = _maybe_scale_targets_mamba(
+            y_train_np, y_test_np, task
+        )
+
+        train_loader = make_dataloader(
+            X=X_train_combined,
+            y=y_train_for_train,
+            window_size=window_size,
+            batch_size=batch_size,
+            shuffle=True,
+            drop_last=False,
+        )
+        test_loader = make_dataloader(
+            X=X_test_combined,
+            y=y_test_for_train,
+            window_size=window_size,
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=False,
+        )
+
+        model, criterion, lr = _make_mamba_model(task, X_train_combined.shape[1])
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+
+        train_generic(
+            model,
+            train_loader,
+            test_loader,
+            criterion,
+            optimizer,
+            device,
+            task=task,
+            epochs=40,
+            patience=15,
+        )
+
+        torch.save(model.state_dict(), f"{model_path}_{task}")
+
+        X_forecast = np.vstack([X_train_combined[-window_size:], X_test_combined])
+        y_forecast = np.concatenate([y_train_np[-window_size:], y_test_np])
+        metrics_mamba = evaluate_lstm_rolling(
+            model,
+            X_forecast,
+            y_forecast,
+            window_size=window_size,
+            device=device,
+            task=task,
+            y_scaler=y_scaler,
+            y_test_orig=y_forecast,
+        )
+        print(f"Mamba embeddings VAE {task} metrics:")
+        print(metrics_mamba)
+
+
+    return (
+        train_mamba_categories_pca,
+        train_mamba_embeddings_pca,
+        train_mamba_embeddings_vae,
+        train_mamba_numeric_only,
+    )
+
+
+@app.cell
+def _(train_mamba_numeric_only):
+    train_mamba_numeric_only(
+        "data/models_checkpoints/mamba_numeric", task="continuous"
+    )
+    train_mamba_numeric_only("data/models_checkpoints/mamba_numeric", task="binary")
+    return
+
+
+@app.cell
+def _(train_mamba_categories_pca):
+    train_mamba_categories_pca(
+        "data/models_checkpoints/mamba_cats_pca", task="continuous"
+    )
+    train_mamba_categories_pca(
+        "data/models_checkpoints/mamba_cats_pca", task="binary"
+    )
+    return
+
+
+@app.cell
+def _(train_mamba_embeddings_pca):
+    train_mamba_embeddings_pca(
+        "data/models_checkpoints/mamba_emb_pca", task="continuous"
+    )
+    train_mamba_embeddings_pca(
+        "data/models_checkpoints/mamba_emb_pca", task="binary"
+    )
+    return
+
+
+@app.cell
+def _(train_mamba_embeddings_vae):
+    train_mamba_embeddings_vae(
+        "data/models_checkpoints/mamba_emb_vae", task="continuous"
+    )
+    train_mamba_embeddings_vae(
+        "data/models_checkpoints/mamba_emb_vae", task="binary"
     )
     return
 

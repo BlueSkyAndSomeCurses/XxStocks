@@ -19,6 +19,37 @@ def _to_numpy_1d(values) -> np.ndarray:
     return arr.reshape(-1)
 
 
+class TargetScaler:
+    """Standardise a 1-D regression target to zero mean / unit variance.
+
+    Continuous log-return targets sit at ~1e-3 magnitude. Neural nets with a
+    standard ``nn.Linear`` head emit ~O(1) values at init, so the only easy
+    direction MSE optimisation finds is "shrink the output to ~0", which
+    produces predictions slightly worse than the test mean and therefore
+    R² ≤ 0. Standardising the target before training puts the optimisation on
+    the same footing as the binary cross-entropy task and lets gradients
+    actually carry signal; we inverse-transform predictions before computing
+    metrics so the reported numbers are still in native return units.
+    """
+
+    def __init__(self, mean: float, std: float) -> None:
+        self.mean = float(mean)
+        self.std = float(std) if float(std) > 1e-12 else 1.0
+
+    @classmethod
+    def fit(cls, y) -> "TargetScaler":
+        arr = _to_numpy_1d(y)
+        return cls(mean=float(arr.mean()), std=float(arr.std()))
+
+    def transform(self, y):
+        arr = np.asarray(y, dtype=np.float32)
+        return (arr - np.float32(self.mean)) / np.float32(self.std)
+
+    def inverse_transform(self, y):
+        arr = np.asarray(y, dtype=np.float32)
+        return arr * np.float32(self.std) + np.float32(self.mean)
+
+
 def _binarize_sign(values) -> np.ndarray:
     arr = _to_numpy_1d(values)
     return np.where(arr >= 0, 1, -1)
